@@ -8,6 +8,12 @@ if(CCACHE_FOUND)
     set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
 endif()
 
+install(
+    DIRECTORY bin
+    DESTINATION ${CMAKE_INSTALL_PREFIX}
+    USE_SOURCE_PERMISSIONS
+)
+
 add_subdirectory(core)
 add_subdirectory(gapy)
 add_subdirectory(gvtest)
