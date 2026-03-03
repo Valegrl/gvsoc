@@ -15,15 +15,14 @@
 #
 
 import gvsoc.runner
-import pulp.snitch.snitch_core as iss
-import memory.memory as memory
-import interco.router as router
 import gvsoc.systree
 
+import interco.router as router
+import memory.memory as memory
 from pulp.mempool.dma.mempool_dma import MemPoolDma
 from elftools.elf.elffile import *
 from pulp.mempool.mempool_cluster import Cluster
-from pulp.mempool.ctrl_registers import CtrlRegisters
+from pulp.chips.flex_cluster.cluster_registers import ClusterRegisters
 
 import gvsoc.runner
 import math
@@ -118,8 +117,8 @@ class ClusterUnit(gvsoc.systree.Component):
         # Boot Rom
         rom = memory.Memory(self, 'rom', size=0x1000, width_log2=(arch.axi_data_width - 1).bit_length(), stim_file=self.get_file_path('pulp/chips/spatz/rom.bin'))
 
-        # CSR
-        csr = CtrlRegisters(self, 'ctrl_registers', wakeup_latency=18 if arch.terapool else 15)
+        # Cluster CSRs
+        cluster_regs = ClusterRegisters(self, 'ctrl_registers', wakeup_latency=18 if arch.terapool else 15)
 
         # DMA
         dma = MemPoolDma(self, 'dma', loc_base=0x0, loc_size=0x400000, tcdm_width=arch.total_cores*arch.bank_factor*4)
@@ -175,7 +174,7 @@ class ClusterUnit(gvsoc.systree.Component):
         cluster_ico.o_MAP(rom.i_INPUT(), base=0x40000000, size=0x20000, latency=1, rm_base=False)
 
         # periph interconnect -> CSR
-        periph_ico.o_MAP(csr.i_INPUT(), base=0x40000000, size=0x10000, latency=1, rm_base=True)
+        periph_ico.o_MAP(cluster_regs.i_INPUT(), base=0x40000000, size=0x10000, latency=1, rm_base=True)
 
         # periph interconnect -> DMA Ctrl
         periph_ico.o_MAP(dma.i_INPUT(), base=0x40010000, size=0x10000, latency=1, rm_base=True)
@@ -186,22 +185,11 @@ class ClusterUnit(gvsoc.systree.Component):
         ## SYNCHRONIZATION
 
         # HBM preload done
-        self.o_HBM_PRELOAD_DONE(csr.i_HBM_PRELOAD_DONE())
+        self.o_HBM_PRELOAD_DONE(mempool_cluster.i_FETCH_START())
 
-        # Synchronization routers
-        sync_router_master = router.Router(self, 'sync_router_master', bandwidth=4)
-        sync_router_slave = router.Router(self, 'sync_router_slave', bandwidth=4)
-
-        # Global Synchronization Master
-        periph_ico.o_MAP(sync_router_master.i_INPUT, base=arch.sync_area.base, size=arch.sync_area.size*arch.num_cluster_x*arch.num_cluster_y, rm_base=False)
-        sync_router_master.o_MAP(self.i_SYNC_OUTPUT())
-        csr.o_GLOBAL_BARRIER_MASTER(sync_router_master.i_INPUT())
-
-        # Global Synchronization Slave
-        self.o_SYNC_INPUT(sync_router_slave.i_INPUT())
-        sync_router_slave.o_MAP(tcdm.i_SYNC_INPUT())
-        sync_router_slave.o_MAP(csr.i_GLOBAL_BARRIER_SLAVE(), base=arch.tcdm.sync_itlv, size=arch.tcdm.sync_special_mem, rm_base=True)
-
+      	#Cluster Registers for synchronization barrier
+        for i in range(0, arch.total_cores):
+            self.bind(cluster_regs, f'barrier_ack', mempool_cluster, f'barrier_ack_{i}')
 
     def i_WIDE_SOC(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'wide_soc', signature='io')
@@ -221,16 +209,10 @@ class ClusterUnit(gvsoc.systree.Component):
     def o_NARROW_SOC(self, itf: gvsoc.systree.SlaveItf):
         self.itf_bind('narrow_soc', itf, signature='io')
 
-    def i_SYNC_OUTPUT(self) -> gvsoc.systree.SlaveItf:
-        return gvsoc.systree.SlaveItf(self, 'sync_output', signature='io')
-
-    def o_SYNC_OUTPUT(self, itf: gvsoc.systree.SlaveItf):
-        self.itf_bind('sync_output', itf, signature='io')
-
-    def i_SYNC_INPUT(self) -> gvsoc.systree.SlaveItf:
+    def i_GLOBAL_SYNC(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, f'sync_input', signature='io')
 
-    def o_SYNC_INPUT(self, itf: gvsoc.systree.SlaveItf):
+    def o_GLOBAL_SYNC(self, itf: gvsoc.systree.SlaveItf):
         self.itf_bind('sync_input', itf, signature='io', composite_bind=True)
 
     def i_HBM_PRELOAD_DONE(self) -> gvsoc.systree.SlaveItf:

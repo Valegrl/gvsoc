@@ -39,14 +39,18 @@ private:
     static void debug_stop_event_handler(vp::Block *__this, vp::ClockEvent *event);
     static void hbm_preload_done_handler(vp::Block *__this, bool value);
     static void hbm_preload_done_to_cluster_handler(vp::Block *__this, vp::ClockEvent *event);
+    static void wakeup_event_handler(vp::Block *__this, vp::ClockEvent *event);
     void reset(bool active);
 
     vp::Trace trace;
     vp::IoSlave input_itf;
+    vp::WireMaster<bool> barrier_ack_itf;
     vp::WireSlave<bool> hbm_preload_done_itf;
     vp::ClockEvent * debug_stop_event;
     vp::WireMaster<bool> * hbm_preload_done_to_cluster_itf_array;
     vp::ClockEvent * hbm_preload_done_to_cluster_event;
+    vp::ClockEvent * wakeup_event;
+    int wakeup_latency;
     int64_t timer_start;
     uint32_t num_cluster_x;
     uint32_t num_cluster_y;
@@ -54,8 +58,6 @@ private:
     uint32_t has_preload_binary;
     uint32_t hbm_preload_done;
 };
-
-
 
 CtrlRegisters::CtrlRegisters(vp::ComponentConf &config)
     : vp::Component(config)
@@ -70,6 +72,7 @@ CtrlRegisters::CtrlRegisters(vp::ComponentConf &config)
     this->hbm_preload_done_itf.set_sync_meth(&CtrlRegisters::hbm_preload_done_handler);
 
     this->new_slave_port("input", &this->input_itf);
+    this->new_master_port("barrier_ack", &this->barrier_ack_itf);
     this->hbm_preload_done_to_cluster_itf_array = new vp::WireMaster<bool>[this->num_cluster_all];
     for (int i = 0; i < this->num_cluster_all; ++i)
     {
@@ -80,6 +83,8 @@ CtrlRegisters::CtrlRegisters(vp::ComponentConf &config)
     this->hbm_preload_done_to_cluster_event = this->event_new(&CtrlRegisters::hbm_preload_done_to_cluster_handler);
     this->timer_start = 0;
     this->hbm_preload_done = (this->has_preload_binary == 0)? 1:0;
+    this->wakeup_event = this->event_new(&CtrlRegisters::wakeup_event_handler);
+    wakeup_latency = get_js_config()->get_child_int("wakeup_latency");
 }
 
 void CtrlRegisters::reset(bool active)
@@ -111,12 +116,17 @@ void CtrlRegisters::hbm_preload_done_to_cluster_handler(vp::Block *__this, vp::C
     }
 }
 
-
 void CtrlRegisters::hbm_preload_done_handler(vp::Block *__this, bool value)
 {
     CtrlRegisters *_this = (CtrlRegisters *)__this;
     _this->hbm_preload_done = 1;
     _this->trace.msg(vp::Trace::LEVEL_DEBUG, "HBM Preloading Done\n");
+}
+
+void CtrlRegisters::wakeup_event_handler(vp::Block *__this, vp::ClockEvent *event) {
+    CtrlRegisters *_this = (CtrlRegisters *)__this;
+    _this->barrier_ack_itf.sync(1);
+    _this->trace.msg("Control registers wake up signal work and write %d to barrier ack output\n", 1);
 }
 
 
@@ -139,9 +149,9 @@ vp::IoReqStatus CtrlRegisters::req(vp::Block *__this, vp::IoReq *req)
             // std::cout << "EOC register return value: 0x" << std::hex << value << std::endl;
             _this->time.get_engine()->quit(0);
         }
-        if (offset == 4)
+        if (offset == 4 && value == 0xFFFFFFFF)
         {
-            //Do nothing
+            _this->event_enqueue(_this->wakeup_event, _this->wakeup_latency);
         }
         if (offset == 8)
         {

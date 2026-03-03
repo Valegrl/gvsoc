@@ -130,11 +130,6 @@ class FlexClusterSystem(gvsoc.systree.Component):
         #Control register
         csr = CtrlRegisters(self, 'ctrl_registers', num_cluster_x=arch.num_cluster_x, num_cluster_y=arch.num_cluster_y, has_preload_binary=has_preload_binary)
 
-        #Synchronization bus
-        sync_bus = FlexMeshNoC(self, 'sync_bus', width=4,
-                nb_x_clusters=arch.num_cluster_x, nb_y_clusters=arch.num_cluster_y,
-                ni_outstanding_reqs=noc_outstanding, router_input_queue_size=noc_outstanding * num_clusters, atomics=1, collective=1)
-
         #HBM channels
         hbm_chan_list_west = []
         for hbm_ch in range(arch.hbm_chan_placement[0]):
@@ -213,6 +208,7 @@ class FlexClusterSystem(gvsoc.systree.Component):
         for cluster_id in range(num_clusters):
             cluster_list[cluster_id].o_NARROW_SOC(virtual_interco.i_INPUT())
             csr.o_HBM_PRELOAD_DONE_TO_CLUSTER(cluster_list[cluster_id].i_HBM_PRELOAD_DONE(),cluster_id)
+            csr.o_BARRIER_ACK(cluster_list[cluster_id].i_GLOBAL_SYNC())
             pass
 
         #Data NoC + Sync NoC
@@ -220,9 +216,7 @@ class FlexClusterSystem(gvsoc.systree.Component):
             x_id = int(node_id%arch.num_cluster_x)
             y_id = int(node_id/arch.num_cluster_x)
             cluster_list[node_id].o_WIDE_SOC(data_noc.i_CLUSTER_INPUT(x_id, y_id))
-            cluster_list[node_id].o_SYNC_OUTPUT(sync_bus.i_CLUSTER_INPUT(x_id, y_id))
-            data_noc.o_MAP(cluster_list[node_id].i_WIDE_INPUT(), base=arch.cluster_tcdm_remote  + node_id*arch.cluster_tcdm_size,   size=arch.cluster_tcdm_size,    x=x_id+1, y=y_id+1)
-            sync_bus.o_MAP(cluster_list[node_id].i_SYNC_INPUT(), base=arch.sync_base            + node_id*(arch.sync_interleave + arch.sync_special_mem),     size=(arch.sync_interleave + arch.sync_special_mem),      x=x_id+1, y=y_id+1)
+            data_noc.o_MAP(cluster_list[node_id].i_WIDE_SOC(), base=arch.cluster_tcdm_remote  + node_id*arch.cluster_tcdm_size,   size=arch.cluster_tcdm_size,    x=x_id+1, y=y_id+1)
             pass
 
         #HBM controllers and channels connections

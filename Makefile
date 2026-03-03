@@ -105,7 +105,7 @@ update:
 	cd pulp && git diff > ../soft_hier/gvsoc_pulp.patch
 	cd core && git add models/cpu && git diff --cached > ../soft_hier/gvsoc_core.patch
 
-drmasys_apply_patch:
+dramsys_apply_patch:
 	git submodule update --init --recursive
 	if cd core && git apply --check ../soft_hier/gvsoc_core.patch; then \
 		git apply ../soft_hier/gvsoc_core.patch;\
@@ -175,7 +175,7 @@ third_party/gnu_toolchain:
 	./configure --prefix=$(abspath third_party/gnu_toolchain/riscv-gnu-toolchain/install) --with-arch=rv32gv_zfh --with-abi=ilp32d --with-cmodel=medlow --enable-multilib; \
 	make
 
-softhier_preparation: drmasys_apply_patch build-systemc build-dramsys build-configs build-toolchain
+softhier_preparation: dramsys_apply_patch build-systemc build-dramsys build-configs build-toolchain
 
 clean_preparation:
 	rm -rf third_party

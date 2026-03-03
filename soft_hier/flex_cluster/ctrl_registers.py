@@ -33,6 +33,9 @@ class CtrlRegisters(gvsoc.systree.Component):
     def i_INPUT(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'input', signature='io')
 
+    def o_BARRIER_ACK(self, itf: gvsoc.systree.SlaveItf):
+        self.itf_bind(f'barrier_ack', itf, signature='io')
+
     def i_HBM_PRELOAD_DONE(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'hbm_preload_done', signature='wire<bool>')
 
