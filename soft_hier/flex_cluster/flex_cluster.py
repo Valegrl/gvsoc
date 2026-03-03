@@ -113,39 +113,15 @@ class FlexClusterSystem(gvsoc.systree.Component):
             cluster_arch = ClusterArch( nb_core_per_cluster =   arch.num_core_per_cluster,
                                         base                =   arch.cluster_tcdm_base,
                                         cluster_id          =   cluster_id,
-                                        tcdm_size           =   arch.cluster_tcdm_size,
-                                        stack_base          =   arch.cluster_stack_base,
-                                        stack_size          =   arch.cluster_stack_size,
-                                        zomem_base          =   arch.cluster_zomem_base,
-                                        zomem_size          =   arch.cluster_zomem_size,
                                         reg_base            =   arch.cluster_reg_base,
                                         reg_size            =   arch.cluster_reg_size,
                                         sync_base           =   arch.sync_base,
                                         sync_itlv           =   arch.sync_interleave,
                                         sync_special_mem    =   arch.sync_special_mem,
-                                        insn_base           =   arch.instruction_mem_base,
-                                        insn_size           =   arch.instruction_mem_size,
-                                        nb_tcdm_banks       =   arch.cluster_tcdm_bank_nb,
-                                        tcdm_bank_width     =   arch.cluster_tcdm_bank_width/8,
-                                        redmule_ce_height   =   arch.redmule_ce_height,
-                                        redmule_ce_width    =   arch.redmule_ce_width,
-                                        redmule_ce_pipe     =   arch.redmule_ce_pipe,
-                                        redmule_elem_size   =   arch.redmule_elem_size,
-                                        redmule_queue_depth =   arch.redmule_queue_depth,
-                                        redmule_reg_base    =   arch.redmule_reg_base,
-                                        redmule_reg_size    =   arch.redmule_reg_size,
-                                        idma_outstand_txn   =   arch.idma_outstand_txn,
-                                        idma_outstand_burst =   arch.idma_outstand_burst,
                                         num_cluster_x       =   arch.num_cluster_x,
-                                        num_cluster_y       =   arch.num_cluster_y,
-                                        spatz_core_list     =   arch.spatz_attaced_core_list,
-                                        spatz_num_vlsu      =   arch.spatz_num_vlsu_port,
-                                        spatz_num_fu        =   arch.spatz_num_function_unit,
-                                        spatz_vlsu_bw       =   arch.spatz_vlsu_port_width,
-                                        spatz_vreg_gather_eff = arch.spatz_vreg_gather_eff,
-                                        data_bandwidth      =   arch.noc_link_width/8,
-                                        multi_idma_enable   =   arch.multi_idma_enable)
-            cluster_list.append(ClusterUnit(self,f'cluster_{cluster_id}', cluster_arch, binary))
+                                        num_cluster_y       =   arch.num_cluster_y)
+
+            cluster_list.append(ClusterUnit(self,f'cluster_{cluster_id}', cluster_arch, binary, parser))
             pass
 
         #Virtual router, just for debugging and non-performance-critical jobs (eg, Printf, EoC, Check HBM stored value)
