@@ -35,14 +35,23 @@ public:
 private:
     static vp::IoReqStatus req(vp::Block *__this, vp::IoReq *req);
     static void wakeup_event_handler(vp::Block *__this, vp::ClockEvent *event);
+    static void hbm_preload_done_handler(vp::Block *__this, bool value);
+    static void inst_preheat_done_handler(vp::Block *__this, bool value);
+    void fetch_start_check();
 
     vp::Trace trace;
     vp::IoSlave input_itf;
     vp::WireMaster<bool> barrier_ack_itf;
     vp::WireMaster<IssOffloadInsn<uint32_t>*> rocache_cfg_itf;
+    vp::WireSlave<bool> hbm_preload_done_itf;
+    vp::WireSlave<bool> inst_preheat_done_itf;
+    vp::WireMaster<bool> fetch_start_itf;
     vp::ClockEvent * wakeup_event;
     int wakeup_latency;
     bool eoc_reached;
+    uint32_t hbm_preload_done;
+    uint32_t inst_preheat_done;
+    uint32_t fetch_started;
 };
 
 
@@ -56,6 +65,16 @@ ClusterRegisters::ClusterRegisters(vp::ComponentConf &config)
     this->new_slave_port("input", &this->input_itf);
     this->new_master_port("barrier_ack", &this->barrier_ack_itf);
     this->new_master_port("rocache_cfg", &this->rocache_cfg_itf);
+
+    this->hbm_preload_done_itf.set_sync_meth(&ClusterRegisters::hbm_preload_done_handler);
+    this->inst_preheat_done_itf.set_sync_meth(&ClusterRegisters::inst_preheat_done_handler);
+    this->new_slave_port("hbm_preload_done", &this->hbm_preload_done_itf);
+    this->new_slave_port("inst_preheat_done", &this->inst_preheat_done_itf);
+    this->new_master_port("fetch_start", &this->fetch_start_itf);
+    this->hbm_preload_done = 0;
+    this->inst_preheat_done = 0;
+    this->fetch_started = 0;
+
     this->wakeup_event = this->event_new(&ClusterRegisters::wakeup_event_handler);
     wakeup_latency = get_js_config()->get_child_int("wakeup_latency");
     eoc_reached = false;
@@ -65,6 +84,34 @@ void ClusterRegisters::wakeup_event_handler(vp::Block *__this, vp::ClockEvent *e
     ClusterRegisters *_this = (ClusterRegisters *)__this;
     _this->barrier_ack_itf.sync(1);
     _this->trace.msg("Control registers wake up signal work and write %d to barrier ack output\n", 1);
+}
+
+void ClusterRegisters::hbm_preload_done_handler(vp::Block *__this, bool value)
+{
+    ClusterRegisters *_this = (ClusterRegisters *)__this;
+    _this->hbm_preload_done = 1;
+    _this->trace.msg(vp::Trace::LEVEL_DEBUG, "HBM Preloading Done\n");
+    _this->fetch_start_check();
+}
+
+void ClusterRegisters::inst_preheat_done_handler(vp::Block *__this, bool value)
+{
+    ClusterRegisters *_this = (ClusterRegisters *)__this;
+    _this->inst_preheat_done = 1;
+    _this->trace.msg(vp::Trace::LEVEL_DEBUG, "Instruction Preheating Done\n");
+    _this->fetch_start_check();
+}
+
+void ClusterRegisters::fetch_start_check()
+{
+    if (this->hbm_preload_done && this->inst_preheat_done)
+    {
+        if (this->fetch_started == 0)
+        {
+            this->fetch_started = 1;
+            this->fetch_start_itf.sync(1);
+        }
+    }
 }
 
 

@@ -32,4 +32,13 @@ class ClusterRegisters(gvsoc.systree.Component):
         return gvsoc.systree.SlaveItf(self, 'input', signature='io')
     
     def o_BARRIER_ACK(self, itf: gvsoc.systree.SlaveItf):
-    	self.itf_bind(f'barrier_ack', itf, signature='io')
+        self.itf_bind(f'barrier_ack', itf, signature='io')
+
+    def i_HBM_PRELOAD_DONE(self) -> gvsoc.systree.SlaveItf:
+        return gvsoc.systree.SlaveItf(self, 'hbm_preload_done', signature='wire<bool>')
+
+    def i_INST_PREHEAT_DONE(self) -> gvsoc.systree.SlaveItf:
+        return gvsoc.systree.SlaveItf(self, 'inst_preheat_done', signature='wire<bool>')
+
+    def o_FETCH_START(self, itf: gvsoc.systree.SlaveItf):
+        self.itf_bind(f'fetch_start', itf, signature='wire<bool>')

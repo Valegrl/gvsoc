@@ -184,8 +184,27 @@ class ClusterUnit(gvsoc.systree.Component):
 
         ## SYNCHRONIZATION
 
-        # HBM preload done
-        self.o_HBM_PRELOAD_DONE(mempool_cluster.i_FETCH_START())
+        # Per-cluster binary loader
+        loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary)
+
+        # Loader router for directing binary sections to appropriate memories
+        loader_router = router.Router(self, 'loader_router', bandwidth=32, latency=1)
+        loader.o_OUT(loader_router.i_INPUT())
+        loader_router.o_MAP(rom.i_INPUT(), base=0xa0000000, size=0x10000, rm_base=True)
+        loader_router.add_mapping('wide_soc')
+        self.bind(loader_router, 'wide_soc', wide_soc_router, 'input')
+
+        # Loader start -> cluster registers (instruction preheat done)
+        loader.o_START(cluster_regs.i_INST_PREHEAT_DONE())
+
+        # Loader entry -> mempool cluster (boot address for cores)
+        self.bind(loader, 'entry', mempool_cluster, 'loader_entry')
+
+        # HBM preload done -> cluster registers
+        self.o_HBM_PRELOAD_DONE(cluster_regs.i_HBM_PRELOAD_DONE())
+
+        # Cluster registers fetch start -> mempool cluster (fetch enable for cores)
+        self.bind(cluster_regs, 'fetch_start', mempool_cluster, 'loader_start')
 
       	#Cluster Registers for synchronization barrier
         for i in range(0, arch.total_cores):
