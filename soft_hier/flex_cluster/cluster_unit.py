@@ -66,9 +66,6 @@ class ClusterArch:
                         cluster_id,
                         reg_base,            
                         reg_size,
-                        sync_base,           
-                        sync_itlv, 
-                        sync_special_mem,
                         num_cluster_x,       
                         num_cluster_y, 
                         auto_fetch=False):
@@ -77,8 +74,6 @@ class ClusterArch:
         self.base                   = base
         self.cluster_id             = cluster_id
         self.auto_fetch             = auto_fetch
-        self.barrier_irq            = 19
-        self.sync_area              = Area(sync_base, sync_itlv + sync_special_mem)
         self.reg_area               = Area(reg_base, reg_size)
 
         # Cluster configuration
@@ -136,42 +131,31 @@ class ClusterUnit(gvsoc.systree.Component):
 
         nb_axi_masters = arch.nb_axi_masters_per_group * arch.nb_groups
 
-        # AXI Interconnect
-        axi_ico = []
-        for i in range(0, nb_axi_masters):
-            axi_ico.append(router.Router(self, f'axi_ico_{i}', latency=0))
-            axi_ico[i].add_mapping('wide', base=0x80000000, remove_offset=0x80000000, size=0x1000000)
-            axi_ico[i].add_mapping('cluster')
-
         # Wide SoC aggregation router
         wide_soc_router = router.Router(self, 'wide_soc_router', bandwidth=arch.axi_data_width // 8)
 
         # Cluster Interconnect
         cluster_ico = router.Router(self, 'cluster_ico')
 
-        # DMA, CSRs, Synchronization Interconnect
+        # DMA, CSRs Interconnect
         periph_ico = router.Router(self, 'periph_ico', bandwidth=4)
 
-        # Group axi port -> axi interconnect
+        # AXI Interconnect
+        axi_ico = []
         for i in range(0, nb_axi_masters):
+            axi_ico.append(router.Router(self, f'axi_ico_{i}', latency=0))
+            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, size=0x1000000)
+            axi_ico[i].o_MAP(cluster_ico.i_INPUT(), rm_base=False)
             self.bind(mempool_cluster, 'axi_%d' % i, axi_ico[i], 'input')
-
-        # AXI interconnects -> wide SoC router
-        for i in range(nb_axi_masters):
-            self.bind(axi_ico[i], 'wide', wide_soc_router, 'input')
 
         # Router -> Cluster wide SoC port
         wide_soc_router.o_MAP(self.i_WIDE_SOC())
-
-        # axi interconnect -> cluster interconnect
-        for i in range(0, nb_axi_masters):
-            self.bind(axi_ico[i], 'cluster', cluster_ico, 'input')
 
         # cluster interconnect -> Bootrom
         cluster_ico.o_MAP(rom.i_INPUT(), base=0xa0000000, size=0x10000, latency=1, rm_base=True)
 
         # cluster interconnect -> periph interconnect
-        cluster_ico.o_MAP(rom.i_INPUT(), base=0x40000000, size=0x20000, latency=1, rm_base=False)
+        cluster_ico.o_MAP(periph_ico.i_INPUT(), base=0x40000000, size=0x20000, latency=1, rm_base=False)
 
         # periph interconnect -> CSR
         periph_ico.o_MAP(cluster_regs.i_INPUT(), base=0x40000000, size=0x10000, latency=1, rm_base=True)
@@ -191,8 +175,7 @@ class ClusterUnit(gvsoc.systree.Component):
         loader_router = router.Router(self, 'loader_router', bandwidth=32, latency=1)
         loader.o_OUT(loader_router.i_INPUT())
         loader_router.o_MAP(rom.i_INPUT(), base=0xa0000000, size=0x10000, rm_base=True)
-        loader_router.add_mapping('wide_soc')
-        self.bind(loader_router, 'wide_soc', wide_soc_router, 'input')
+        loader_router.o_MAP(wide_soc_router.i_INPUT())
 
         # Loader start -> cluster registers (instruction preheat done)
         loader.o_START(cluster_regs.i_INST_PREHEAT_DONE())

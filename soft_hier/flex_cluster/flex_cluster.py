@@ -115,9 +115,6 @@ class FlexClusterSystem(gvsoc.systree.Component):
                                         cluster_id          =   cluster_id,
                                         reg_base            =   arch.cluster_reg_base,
                                         reg_size            =   arch.cluster_reg_size,
-                                        sync_base           =   arch.sync_base,
-                                        sync_itlv           =   arch.sync_interleave,
-                                        sync_special_mem    =   arch.sync_special_mem,
                                         num_cluster_x       =   arch.num_cluster_x,
                                         num_cluster_y       =   arch.num_cluster_y)
 
@@ -211,7 +208,7 @@ class FlexClusterSystem(gvsoc.systree.Component):
             csr.o_BARRIER_ACK(cluster_list[cluster_id].i_GLOBAL_SYNC())
             pass
 
-        #Data NoC + Sync NoC
+        #Data NoC
         for node_id in range(num_clusters):
             x_id = int(node_id%arch.num_cluster_x)
             y_id = int(node_id/arch.num_cluster_x)
