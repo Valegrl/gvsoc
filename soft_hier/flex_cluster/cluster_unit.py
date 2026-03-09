@@ -78,14 +78,14 @@ class ClusterArch:
 
         # Cluster configuration
         self.async_l1_interco           = False
-        self.terapool                   = True
-        self.nb_cores_per_tile          = 8
-        self.nb_sub_groups_per_group    = 4
+        self.terapool                   = False
+        self.nb_cores_per_tile          = 4
+        self.nb_sub_groups_per_group    = 1
         self.nb_groups                  = 4
-        self.total_cores                = 1024
+        self.total_cores                = 16
         self.bank_factor                = 4
-        self.axi_data_width             = 512
-        self.nb_axi_masters_per_group   = 4
+        self.axi_data_width             = 64
+        self.nb_axi_masters_per_group   = 1
 
         #Global Information
         self.num_cluster_x          = num_cluster_x

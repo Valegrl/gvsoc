@@ -45,7 +45,7 @@ all: checkout build
 checkout:
 	git submodule update --recursive --init
 
-.PHONY: build gui
+.PHONY: build
 
 ifdef DEBUG
 BUILD_TYPE = RelWithDebInfo
@@ -64,7 +64,7 @@ build: gvrun.build
 	# Change directory to curdir to avoid issue with symbolic links
 	cd $(CURDIR) && $(CMAKE) -S . -B $(BUILDDIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DCMAKE_INSTALL_PREFIX=$(INSTALLDIR) \
-		-DGVSOC_MODULES="$(CURDIR)/core/models;$(CURDIR)/pulp;$(CURDIR)/pulp/targets;$(CURDIR)/gvrun/python;$(MODULES)" \
+		-DGVSOC_MODULES="$(CURDIR)/core/models;$(CURDIR)/pulp;$(CURDIR)/gvrun/python;$(MODULES)" \
 		-DGVSOC_TARGETS="${TARGETS}" \
 		-DCMAKE_SKIP_INSTALL_RPATH=false
 
@@ -333,14 +333,3 @@ snitch_cluster.test:
 	cd snitch_cluster/target/snitch_cluster && GVSOC_TARGET=$(TARGETS) ./util/run.py sw/run.yaml --simulator gvsoc -j
 
 snitch_cluster: snitch_cluster.checkout snitch_cluster.build snitch_cluster.test
-
-
-gui:
-	@if [ ! -d "gui-release" ]; then \
-		git clone "git@github.com:gvsoc/gui.git" "gui-release"; \
-	fi
-	cd "gui-release" && \
-	git fetch --all && \
-	git checkout 95ca11922a760b526275ae3abda65988de2caeab
-	mkdir -p $(INSTALLDIR)
-	cp -r gui-release/* $(INSTALLDIR)
