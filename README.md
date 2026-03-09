@@ -85,3 +85,99 @@ If you intend to use or reference GVSoC for an academic publication, please cons
 ## Using GVSoC with DRAMsys
 
 If you want to use DRAMsys with GVSoC follow the steps mentioned in [DRAMsys.md](./DRAMSys.md)
+
+---
+
+## Getting Started with SoftHier Simulation 🚀
+
+### Set Up the Environment 🏁
+
+Initialize the simulator environment by running:
+
+```bash
+source sourceme.sh
+```
+
+### Build and Run the SoftHier Simulation Model 🧱
+
+1. **Build the SoftHier hardware model** 🛠️
+
+   ```bash
+   make tmp_hw
+   ```
+
+   This performs a clean build, applies the upstream FlooNoC patch, and compiles the `flex_cluster` target.
+   The default architecture configuration is `soft_hier/flex_cluster/flex_cluster_arch.py`. To use a custom one:
+
+   ```bash
+   cfg=<path/to/your/architecture/configuration/file> make tmp_hw
+   ```
+
+2. **Run the simulation** with a binary 🎮
+
+   ```bash
+   ./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary <path/to/your/binary.elf> run --trace=/chip/cluster_0/redmule
+   ```
+
+   - `--binary`: Specifies the executable binary to load.
+   - `--trace`: Selects which component's trace logs are generated.
+
+### Build the Default Binary 💾
+
+To build the default binary from `soft_hier/flex_cluster_sdk/app_example`, run:
+
+```bash
+make sw
+```
+
+The generated binary `sw_build/softhier.elf` and dump file `sw_build/softhier.dump` are placed in `sw_build/`.
+
+### Build a Custom Binary ✏️
+
+1. Prepare your source code in a folder with a `CMakeLists.txt` that exports sources and include paths:
+
+   ```cmake
+   set(SRC_SOURCES
+       ${CMAKE_CURRENT_SOURCE_DIR}/main.c
+   )
+
+   set(SOURCES ${SRC_SOURCES} PARENT_SCOPE)
+   set(INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include PARENT_SCOPE)
+   ```
+
+2. Build by pointing `app` to your folder:
+
+   ```bash
+   app=<folder/of/your/code> make sw
+   ```
+
+### Build Customized Hardware and Software (Highly Recommended) 🧩
+
+The `hs` target builds hardware and software together in one step.
+It uses the local FlooNoC sources (without fetching from upstream); run `make tmp_hw` first if you need the upstream FlooNoC patch applied before doing iterative `hs` builds.
+
+```bash
+cfg=<path/to/your/architecture/configuration/file> app=<folder/of/your/code> make hs
+```
+
+**Example — default app with default architecture:**
+
+```bash
+app=soft_hier/flex_cluster_sdk/app_example make hs; make run
+```
+
+## SoftHier Visualization 📈
+
+To visualize a SoftHier simulation:
+
+1. Run the simulation with the `runv` target (generates a trace log).
+2. Convert the trace to Perfetto format with the `pfto` target.
+
+Integrated example:
+
+```bash
+cfg=<arch_cfg> app=<app_folder> make hs runv pfto
+```
+
+The trace file is saved at `sw_build/perfetto.json`.  
+Open it at 👉 [https://ui.perfetto.dev/](https://ui.perfetto.dev/)

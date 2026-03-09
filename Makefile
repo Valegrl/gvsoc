@@ -45,7 +45,7 @@ all: checkout build
 checkout:
 	git submodule update --recursive --init
 
-.PHONY: build
+.PHONY: build tmp_hw
 
 ifdef DEBUG
 BUILD_TYPE = RelWithDebInfo
@@ -198,6 +198,23 @@ config:
 hw:
 	make config
 	make TARGETS=pulp.chips.flex_cluster.flex_cluster all
+
+FLOONOC_COMMIT := 3ca2016d056dda72317e27c4319fc6174b5f8c4d
+FLOONOC_REPO   := https://github.com/gvsoc/gvsoc-pulp.git
+
+tmp_hw:
+	$(MAKE) clean
+	$(MAKE) config
+	tmpdir=$$(mktemp -d) && \
+	git clone $(FLOONOC_REPO) $$tmpdir/gvsoc-pulp && \
+	cd $$tmpdir/gvsoc-pulp && \
+	git checkout $(FLOONOC_COMMIT) && \
+	cp -rf pulp/floonoc/. $(CURDIR)/pulp/pulp/floonoc/ && \
+	rm -rf $$tmpdir
+	if cd pulp && git apply --check --include='pulp/floonoc/*' ../soft_hier/gvsoc_pulp.patch 2>/dev/null; then \
+		git apply --include='pulp/floonoc/*' ../soft_hier/gvsoc_pulp.patch; \
+	fi
+	$(MAKE) TARGETS=pulp.chips.flex_cluster.flex_cluster build
 
 # bowwang: Deeploy-related
 hw-deeploy:
