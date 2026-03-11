@@ -161,7 +161,8 @@ class ClusterUnit(gvsoc.systree.Component):
         periph_ico.o_MAP(cluster_regs.i_INPUT(), base=0x40000000, size=0x10000, latency=1, rm_base=True)
 
         # periph interconnect -> DMA Ctrl
-        periph_ico.o_MAP(dma.i_INPUT(), base=0x40010000, size=0x10000, latency=1, rm_base=True)
+        periph_ico.add_mapping('dma', base=0x40010000, size=0x10000, latency=1, remove_offset=0x40010000)
+        self.bind(periph_ico, 'dma', dma, 'input')
 
         # narrow_soc
         periph_ico.o_MAP(self.i_NARROW_SOC())
