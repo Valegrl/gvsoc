@@ -1,5 +1,5 @@
 #include "flex_runtime.h"
-#include "example_one_cluster_gemm.h"
+#include "example_vector_add.h"
 #include <math.h>
 
 int main()
@@ -12,7 +12,7 @@ int main()
     /*  Program Execution Region -- Start */
     /**************************************/
 
-    example_one_cluster_gemm();
+    // example_vector_add();
 
     /**************************************/
     /*  Program Execution Region -- Stop  */

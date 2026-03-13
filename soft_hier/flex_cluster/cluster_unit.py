@@ -70,7 +70,6 @@ class ClusterArch:
                         num_cluster_y, 
                         auto_fetch=False):
 
-        self.nb_core                = nb_core_per_cluster
         self.base                   = base
         self.cluster_id             = cluster_id
         self.auto_fetch             = auto_fetch
@@ -82,7 +81,7 @@ class ClusterArch:
         self.nb_cores_per_tile          = 4
         self.nb_sub_groups_per_group    = 1
         self.nb_groups                  = 4
-        self.total_cores                = 16
+        self.total_cores                = nb_core_per_cluster
         self.bank_factor                = 4
         self.axi_data_width             = 64
         self.nb_axi_masters_per_group   = 1
