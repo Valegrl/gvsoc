@@ -143,7 +143,7 @@ class ClusterUnit(gvsoc.systree.Component):
         axi_ico = []
         for i in range(0, nb_axi_masters):
             axi_ico.append(router.Router(self, f'axi_ico_{i}', latency=0))
-            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, size=0x1000000)
+            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, size=0x80000000, rm_base=False)
             axi_ico[i].o_MAP(cluster_ico.i_INPUT(), rm_base=False)
             self.bind(mempool_cluster, 'axi_%d' % i, axi_ico[i], 'input')
 
