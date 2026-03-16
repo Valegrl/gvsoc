@@ -109,7 +109,7 @@ class ClusterUnit(gvsoc.systree.Component):
                                  nb_axi_masters_per_group=arch.nb_axi_masters_per_group)
 
         # Boot Rom
-        rom = memory.Memory(self, 'rom', size=0x1000, width_log2=(arch.axi_data_width - 1).bit_length(), stim_file=self.get_file_path('pulp/chips/spatz/rom.bin'))
+        rom = memory.Memory(self, 'rom', size=0x10000, width_log2=(arch.axi_data_width - 1).bit_length(), stim_file=self.get_file_path('pulp/chips/spatz/rom.bin'))
 
         # Cluster CSRs
         cluster_regs = ClusterRegisters(self, 'ctrl_registers', wakeup_latency=18 if arch.terapool else 15)
@@ -143,7 +143,7 @@ class ClusterUnit(gvsoc.systree.Component):
         axi_ico = []
         for i in range(0, nb_axi_masters):
             axi_ico.append(router.Router(self, f'axi_ico_{i}', latency=0))
-            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, size=0x80000000, rm_base=False)
+            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, remove_offset=0x80000000, size=0x1000000)
             axi_ico[i].o_MAP(cluster_ico.i_INPUT(), rm_base=False)
             self.bind(mempool_cluster, 'axi_%d' % i, axi_ico[i], 'input')
 
@@ -172,7 +172,7 @@ class ClusterUnit(gvsoc.systree.Component):
         loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary)
 
         # Loader router for directing binary sections to appropriate memories
-        loader_router = router.Router(self, 'loader_router', bandwidth=32, latency=1)
+        loader_router = router.Router(self, 'loader_router', bandwidth=8, latency=1)
         loader.o_OUT(loader_router.i_INPUT())
         loader_router.o_MAP(rom.i_INPUT(), base=0xa0000000, size=0x10000, rm_base=True)
         loader_router.o_MAP(wide_soc_router.i_INPUT())
