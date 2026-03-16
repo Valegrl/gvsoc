@@ -46,7 +46,7 @@ SECTIONS
     *(.text)
     . = ALIGN(4);
     _etext = .;
-  } >L3 :l3
+  } >HBM :hbm
 
   /* By default, constant data goes into L3, right after code section */
   .rodata :
@@ -55,10 +55,10 @@ SECTIONS
     *(.rodata)
     *(.rodata*)
     . = ALIGN(4);
-  } >L3 :l3
+  } >HBM :hbm
 
   /* HTIF section for FESVR */
-  .htif         : { } >L3 :l3
+  .htif         : { } >HBM :hbm
 
   /* Thread Local Storage sections */
   .tdata    :
@@ -66,7 +66,7 @@ SECTIONS
     __tdata_start = .;
     *(.tdata .tdata.* .gnu.linkonce.td.*)
     __tdata_end = .;
-  } >L3 :l3
+  } >HBM :hbm
   .tbss :
   {
     __tbss_start = .;
@@ -74,7 +74,7 @@ SECTIONS
     *(.tcommon)
     __tbss_end = .;
     __tbss_end2 = .;
-  } >L3 :l3
+  } >HBM :hbm
   /* add a section after .tbss to put the __tbss_end symbol into for
      the LLD linker */
   /* .tbssend : { __tbss_end2 = .; } */
@@ -85,13 +85,13 @@ SECTIONS
     __cdata_start = .;
     *(.cdata .cdata.*)
     __cdata_end = .;
-  } >L3 :l3
+  } >HBM :hbm
   .cbss :
   {
     __cbss_start = .;
     KEEP(*(.cbss .cbss.*))
     __cbss_end = .;
-  } >L3 :l3
+  } >HBM :hbm
 
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
@@ -103,7 +103,7 @@ SECTIONS
     __global_pointer$ = . + 0x7f0;
     *(.srodata.cst16) *(.srodata.cst8) *(.srodata.cst4) *(.srodata.cst2) *(.srodata .srodata.*)
     *(.sdata .sdata.* .gnu.linkonce.s.*)
-  } >L3 :l3
+  } >HBM :hbm
 
   /* Initialized data sections goes into L3 */
   .data :
@@ -122,7 +122,7 @@ SECTIONS
     *(.dynsbss)
     *(.sbss .sbss.* .gnu.linkonce.sb.*)
     *(.scommon)
-  } >L3 :l3
+  } >HBM :hbm
 
   /* Uninitialized data section */
   .bss            :
@@ -134,7 +134,7 @@ SECTIONS
       _end.  Align after .bss to ensure correct alignment even if the
       .bss section disappears because there are no input sections. */
    . = ALIGN(. != 0 ? 32 / 8 : 1);
-  } >L3 :l3
+  } >HBM :hbm
   . = ALIGN(32 / 8);
   . = SEGMENT_START("ldata-segment", .);
   . = ALIGN(32 / 8);
@@ -148,7 +148,7 @@ SECTIONS
   {
     *(.dram)
     _edram = .;
-  } >L3 :l3
+  } >HBM :hbm
 
   .hbm :
   {
