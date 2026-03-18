@@ -46,7 +46,7 @@ SECTIONS
     *(.text)
     . = ALIGN(4);
     _etext = .;
-  } >HBM :hbm
+  } >L3 :l3
 
   /* By default, constant data goes into L3, right after code section */
   .rodata :
@@ -55,10 +55,10 @@ SECTIONS
     *(.rodata)
     *(.rodata*)
     . = ALIGN(4);
-  } >HBM :hbm
+  } >L3 :l3
 
   /* HTIF section for FESVR */
-  .htif         : { } >HBM :hbm
+  .htif         : { } >L3 :l3
 
   /* Thread Local Storage sections */
   .tdata    :
@@ -66,7 +66,7 @@ SECTIONS
     __tdata_start = .;
     *(.tdata .tdata.* .gnu.linkonce.td.*)
     __tdata_end = .;
-  } >HBM :hbm
+  } >L3 :l3
   .tbss :
   {
     __tbss_start = .;
@@ -74,7 +74,7 @@ SECTIONS
     *(.tcommon)
     __tbss_end = .;
     __tbss_end2 = .;
-  } >HBM :hbm
+  } >L3 :l3
   /* add a section after .tbss to put the __tbss_end symbol into for
      the LLD linker */
   /* .tbssend : { __tbss_end2 = .; } */
@@ -85,13 +85,13 @@ SECTIONS
     __cdata_start = .;
     *(.cdata .cdata.*)
     __cdata_end = .;
-  } >HBM :hbm
+  } >L3 :l3
   .cbss :
   {
     __cbss_start = .;
     KEEP(*(.cbss .cbss.*))
     __cbss_end = .;
-  } >HBM :hbm
+  } >L3 :l3
 
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
@@ -103,7 +103,7 @@ SECTIONS
     __global_pointer$ = . + 0x7f0;
     *(.srodata.cst16) *(.srodata.cst8) *(.srodata.cst4) *(.srodata.cst2) *(.srodata .srodata.*)
     *(.sdata .sdata.* .gnu.linkonce.s.*)
-  } >HBM :hbm
+  } >L3 :l3
 
   /* Initialized data sections goes into L3 */
   .data :
@@ -111,7 +111,7 @@ SECTIONS
     __DATA_BEGIN__ = .;
     *(.data .data.* .gnu.linkonce.d.*)
     SORT(CONSTRUCTORS)
-  } >HBM :hbm
+  } >L3 :l3
   _edata = .; PROVIDE (edata = .);
 
   /* small bss section */
@@ -122,7 +122,7 @@ SECTIONS
     *(.dynsbss)
     *(.sbss .sbss.* .gnu.linkonce.sb.*)
     *(.scommon)
-  } >HBM :hbm
+  } >L3 :l3
 
   /* Uninitialized data section */
   .bss            :
@@ -134,7 +134,7 @@ SECTIONS
       _end.  Align after .bss to ensure correct alignment even if the
       .bss section disappears because there are no input sections. */
    . = ALIGN(. != 0 ? 32 / 8 : 1);
-  } >HBM :hbm
+  } >L3 :l3
   . = ALIGN(32 / 8);
   . = SEGMENT_START("ldata-segment", .);
   . = ALIGN(32 / 8);
@@ -148,7 +148,7 @@ SECTIONS
   {
     *(.dram)
     _edram = .;
-  } >HBM :hbm
+  } >L3 :l3
 
   .hbm :
   {
