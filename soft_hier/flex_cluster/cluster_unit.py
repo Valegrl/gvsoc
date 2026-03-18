@@ -67,10 +67,14 @@ class ClusterArch:
                         reg_base,            
                         reg_size,
                         num_cluster_x,       
-                        num_cluster_y, 
+                        num_cluster_y,
+                        insn_base,
+                        insn_size, 
                         auto_fetch=False):
 
         self.base                   = base
+        self.insn_base              = insn_base
+        self.insn_size              = insn_size 
         self.cluster_id             = cluster_id
         self.auto_fetch             = auto_fetch
         self.reg_area               = Area(reg_base, reg_size)
@@ -117,6 +121,9 @@ class ClusterUnit(gvsoc.systree.Component):
         # DMA
         dma = MemPoolDma(self, 'dma', loc_base=0x0, loc_size=0x400000, tcdm_width=arch.total_cores*arch.bank_factor*4)
 
+        #L3 System Memory
+        l3_mem = memory.Memory(self, 'l3_mem', size=arch.insn_size)
+
         #DMA data
         #To emulate distributed backends in groups
         self.bind(dma, 'axi_read', mempool_cluster, 'dma_axi')
@@ -143,12 +150,18 @@ class ClusterUnit(gvsoc.systree.Component):
         axi_ico = []
         for i in range(0, nb_axi_masters):
             axi_ico.append(router.Router(self, f'axi_ico_{i}', latency=0))
-            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, remove_offset=0x80000000, size=0x1000000)
+            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, rm_base=False, size=0x1000000)
             axi_ico[i].o_MAP(cluster_ico.i_INPUT(), rm_base=False)
             self.bind(mempool_cluster, 'axi_%d' % i, axi_ico[i], 'input')
 
         # Router -> Cluster wide SoC port
         wide_soc_router.o_MAP(self.i_WIDE_SOC())
+
+        # L3 Mapping across the NoC for all clusters
+        itf_l3 = router.Router(self, 'l3_router')
+        cluster_ico.o_MAP(itf_l3.i_INPUT(), base=arch.insn_base, size=arch.insn_size)
+        itf_l3.o_MAP(l3_mem.i_INPUT())
+
 
         # cluster interconnect -> Bootrom
         cluster_ico.o_MAP(rom.i_INPUT(), base=0xa0000000, size=0x10000, latency=1, rm_base=True)

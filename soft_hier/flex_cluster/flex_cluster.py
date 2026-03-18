@@ -116,7 +116,9 @@ class FlexClusterSystem(gvsoc.systree.Component):
                                         reg_base            =   arch.cluster_reg_base,
                                         reg_size            =   arch.cluster_reg_size,
                                         num_cluster_x       =   arch.num_cluster_x,
-                                        num_cluster_y       =   arch.num_cluster_y)
+                                        num_cluster_y       =   arch.num_cluster_y,
+                                        insn_base           =   arch.instruction_mem_base,
+                                        insn_size           =   arch.instruction_mem_size)
 
             cluster_list.append(ClusterUnit(self,f'cluster_{cluster_id}', cluster_arch, binary, parser))
             pass
