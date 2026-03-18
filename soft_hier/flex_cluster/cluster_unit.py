@@ -22,6 +22,7 @@ import memory.memory as memory
 from pulp.mempool.dma.mempool_dma import MemPoolDma
 from elftools.elf.elffile import *
 from pulp.mempool.mempool_cluster import Cluster
+from pulp.mempool.l2_subsystem import L2_subsystem
 from pulp.chips.flex_cluster.cluster_registers import ClusterRegisters
 
 import gvsoc.runner
@@ -98,6 +99,8 @@ class ClusterUnit(gvsoc.systree.Component):
     def __init__(self, parent, name, arch, binary, parser, entry=0, auto_fetch=True):
         super().__init__(parent, name)
 
+        nb_axi_masters = arch.nb_axi_masters_per_group * arch.nb_groups
+
         #Mempool cluster
         mempool_cluster=Cluster( self, 'mempool_cluster', 
                                  async_l1_interco=arch.async_l1_interco, 
@@ -112,7 +115,7 @@ class ClusterUnit(gvsoc.systree.Component):
                                  nb_axi_masters_per_group=arch.nb_axi_masters_per_group)
 
         # Boot Rom
-        rom = memory.Memory(self, 'rom', size=0x10000, width_log2=(arch.axi_data_width - 1).bit_length(), stim_file=self.get_file_path('pulp/chips/spatz/rom.bin'))
+        rom = memory.Memory(self, 'rom', size=0x1000, width_log2=(arch.axi_data_width - 1).bit_length(), stim_file=self.get_file_path('pulp/chips/spatz/rom.bin'))
 
         # Cluster CSRs
         cluster_regs = ClusterRegisters(self, 'ctrl_registers', wakeup_latency=18 if arch.terapool else 15)
@@ -120,45 +123,100 @@ class ClusterUnit(gvsoc.systree.Component):
         # DMA
         dma = MemPoolDma(self, 'dma', loc_base=0x0, loc_size=0x400000, tcdm_width=arch.total_cores*arch.bank_factor*4)
 
-        # Per-cluster binary loader
-        loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary)
+        # Binary Loader
+        loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary, entry=0x80000000)
 
-        # L3 Instruction memory
-        instr_mem = memory.Memory(self, 'instr_mem', size=arch.insn_area.size, atomics=True, width_log2=-1)
+        # Originally part of the L3 instruction memory logic in soft_hier/cluster_unit.py
+        # L2 Memory
+        # Efficient bandwidth of each port is only 1/4 of axi_data_width in current design
+        l2_mem = L2_subsystem(self, 'l2_mem', nb_banks=16 if arch.terapool else 4, 
+                              bank_width=arch.axi_data_width, size=0x1000000 if arch.terapool else 0x400000, 
+                              nb_masters=nb_axi_masters, port_bandwidth=arch.axi_data_width//4)
+        
+        #Dummy Memory
+        dummy_mem = memory.Memory(self, 'dummy_mem', atomics=True, size=0x400000)
 
         # Instruction router
         instr_router = router.Router(self, 'instr_router', bandwidth=8*arch.total_cores)
 
-        # Wide SoC aggregation router
-        wide_soc_router = router.Router(self, 'wide_soc_router', bandwidth=arch.axi_data_width // 8)
-
-        # Cluster Interconnect
-        cluster_ico = router.Router(self, 'cluster_ico')
-
         # DMA, CSRs Interconnect
         periph_ico = router.Router(self, 'periph_ico', bandwidth=4)
+
+        # AXI Interconnect
+        axi_ico = []
+        for i in range(0, nb_axi_masters):
+            axi_ico.append(router.Router(self, f'axi_ico_{i}', latency=0))
+            axi_ico[i].add_mapping('l2', base=0x80000000, remove_offset=0x80000000, size=0x1000000)
+            axi_ico[i].add_mapping('soc')
+
+        soc_ico = router.Router(self, 'soc_ico')    # TODO: output bandwidth only
+        soc_ico.add_mapping('bootrom', base=0xa0000000, remove_offset=0xa0000000, size=0x10000, latency=1)
+        soc_ico.add_mapping('peripheral', base=0x40000000, size=0x20000, latency=1)
+
+        periph_ico = router.Router(self, 'periph_ico', bandwidth=4)
+        periph_ico.add_mapping('csr', base=0x40000000, remove_offset=0x40000000, size=0x10000, latency=1)
+        periph_ico.add_mapping('dma_ctrl', base=0x40010000, remove_offset=0x40010000, size=0x10000, latency=1)
+
+        # Binary Loader Router
+        loader_router = router.Router(self, 'loader_router', bandwidth=32, latency=1)
+        loader_router.add_mapping('output')
 
         ###################
         ## INTERCONNECTS ##
         ###################
+
+        # narrow_soc
+        periph_ico.o_MAP(self.i_NARROW_SOC())
+        self.o_NARROW_INPUT(periph_ico.i_INPUT())
+
+        # Group axi port -> axi interconnect
+        for i in range(0, nb_axi_masters):
+            self.bind(mempool_cluster, 'axi_%d' % i, axi_ico[i], 'input')
+
+        # SoC interconnect
+        for i in range(0, nb_axi_masters):
+            self.bind(axi_ico[i], 'soc', soc_ico, 'input')
+
+        # Peripheral interconnect
+        self.bind(soc_ico, 'peripheral', periph_ico, 'input')
+
+        # Bootrom
+        self.bind(soc_ico, 'bootrom', rom, 'input')
+
+        # L2
+        for i in range(0, nb_axi_masters):
+            self.bind(axi_ico[i], 'l2', l2_mem, 'input_%d' % i)
+
+        # CSR
+        self.bind(periph_ico, 'csr', cluster_regs, 'input')
+
+        # DMA Ctrl
+        self.bind(periph_ico, 'dma_ctrl', dma, 'input')
 
         # Binary loader
         loader.o_OUT(instr_router.i_INPUT())
         loader.o_START(cluster_regs.i_INST_PREHEAT_DONE())
         self.o_HBM_PRELOAD_DONE(cluster_regs.i_HBM_PRELOAD_DONE())
 
-        # Instruction router
-        instr_router.o_MAP(cluster_ico.i_INPUT())
-        instr_router.o_MAP(instr_mem.i_INPUT(), base=arch.insn_area.base, size=arch.insn_area.size, rm_base=True)
-
-        # Binding back to instruction memory if access needs
-        cluster_ico.o_MAP(instr_mem.i_INPUT(), base=arch.insn_area.base, size=arch.insn_area.size, rm_base=True)
-
-        # Loader entry -> mempool cluster (boot address for cores)
-        self.bind(loader, 'entry', mempool_cluster, 'loader_entry')
-
-        # Cluster registers fetch start -> mempool cluster (fetch enable for cores)
+        #loader router
         self.bind(cluster_regs, 'fetch_start', mempool_cluster, 'loader_start')
+        self.bind(loader, 'entry', mempool_cluster, 'loader_entry')
+        self.bind(loader, 'out', loader_router, 'input')
+        loader_router.add_mapping('dummy', base=0x00000000, remove_offset=0x00000000, size=0x400000)
+        loader_router.add_mapping('mem', base=0x80000000, remove_offset=0x80000000, size=0x1000000)
+        loader_router.add_mapping('rom', base=0xa0000000, remove_offset=0xa0000000, size=0x1000)
+        loader_router.add_mapping('csr', base=0x40000000, remove_offset=0x40000000, size=0x10000)
+        self.bind(loader_router, 'mem', l2_mem, 'input_loader')
+        self.bind(loader_router, 'rom', rom, 'input')
+        self.bind(loader_router, 'csr', cluster_regs, 'input')
+        self.bind(loader_router, 'dummy', dummy_mem, 'input')
+
+        #Cluster Registers for synchronization barrier
+        for i in range(0, arch.total_cores):
+            self.bind(cluster_regs, f'barrier_ack', mempool_cluster, f'barrier_ack_{i}')
+
+        #L2 ro-cache configuration
+        self.bind(cluster_regs, 'rocache_cfg', mempool_cluster, 'rocache_cfg')
 
         #DMA data
         #To emulate distributed backends in groups
@@ -166,42 +224,6 @@ class ClusterUnit(gvsoc.systree.Component):
         self.bind(dma, 'axi_write', mempool_cluster, 'dma_axi')
         self.bind(dma, 'tcdm_read', mempool_cluster, 'dma_tcdm')
         self.bind(dma, 'tcdm_write', mempool_cluster, 'dma_tcdm')
-
-        nb_axi_masters = arch.nb_axi_masters_per_group * arch.nb_groups
-
-        # AXI Interconnect
-        axi_ico = []
-        for i in range(0, nb_axi_masters):
-            axi_ico.append(router.Router(self, f'axi_ico_{i}', latency=0))
-            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, remove_offset=0x80000000, size=0x1000000)
-            axi_ico[i].o_MAP(cluster_ico.i_INPUT(), rm_base=False)
-            self.bind(mempool_cluster, 'axi_%d' % i, axi_ico[i], 'input')
-
-        # Router -> Cluster wide SoC port
-        wide_soc_router.o_MAP(self.i_WIDE_SOC())
-
-        # cluster interconnect -> Bootrom
-        cluster_ico.o_MAP(rom.i_INPUT(), base=0xa0000000, size=0x10000, latency=1, rm_base=True)
-
-        # cluster interconnect -> periph interconnect
-        cluster_ico.o_MAP(periph_ico.i_INPUT(), base=0x40000000, size=0x20000, latency=1, rm_base=False)
-
-        # periph interconnect -> CSR
-        periph_ico.o_MAP(cluster_regs.i_INPUT(), base=0x40000000, size=0x10000, latency=1, rm_base=True)
-
-        # periph interconnect -> DMA Ctrl
-        periph_ico.add_mapping('dma', base=0x40010000, size=0x10000, latency=1, remove_offset=0x40010000)
-        self.bind(periph_ico, 'dma', dma, 'input')
-
-        # narrow_soc
-        periph_ico.o_MAP(self.i_NARROW_SOC())
-        self.o_NARROW_INPUT(periph_ico.i_INPUT())
-
-        ## SYNCHRONIZATION
-
-      	#Cluster Registers for synchronization barrier
-        for i in range(0, arch.total_cores):
-            self.bind(cluster_regs, f'barrier_ack', mempool_cluster, f'barrier_ack_{i}')
 
     def i_WIDE_SOC(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'wide_soc', signature='io')
