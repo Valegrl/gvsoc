@@ -73,11 +73,10 @@ class ClusterArch:
                         auto_fetch=False):
 
         self.base                   = base
-        self.insn_base              = insn_base
-        self.insn_size              = insn_size 
         self.cluster_id             = cluster_id
         self.auto_fetch             = auto_fetch
         self.reg_area               = Area(reg_base, reg_size)
+        self.insn_area              = Area(insn_base, insn_size)
 
         # Cluster configuration
         self.async_l1_interco           = False
@@ -121,21 +120,14 @@ class ClusterUnit(gvsoc.systree.Component):
         # DMA
         dma = MemPoolDma(self, 'dma', loc_base=0x0, loc_size=0x400000, tcdm_width=arch.total_cores*arch.bank_factor*4)
 
-        #L3 System Memory
-        l3_mem = memory.Memory(self, 'l3_mem', size=arch.insn_size)
+        # Per-cluster binary loader
+        loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary)
 
-        #DMA data
-        #To emulate distributed backends in groups
-        self.bind(dma, 'axi_read', mempool_cluster, 'dma_axi')
-        self.bind(dma, 'axi_write', mempool_cluster, 'dma_axi')
-        self.bind(dma, 'tcdm_read', mempool_cluster, 'dma_tcdm')
-        self.bind(dma, 'tcdm_write', mempool_cluster, 'dma_tcdm')
+        # L3 Instruction memory
+        instr_mem = memory.Memory(self, 'instr_mem', size=arch.insn_area.size, atomics=True, width_log2=-1)
 
-        ###################
-        ## INTERCONNECTS ##
-        ###################
-
-        nb_axi_masters = arch.nb_axi_masters_per_group * arch.nb_groups
+        # Instruction router
+        instr_router = router.Router(self, 'instr_router', bandwidth=8*arch.total_cores)
 
         # Wide SoC aggregation router
         wide_soc_router = router.Router(self, 'wide_soc_router', bandwidth=arch.axi_data_width // 8)
@@ -146,22 +138,47 @@ class ClusterUnit(gvsoc.systree.Component):
         # DMA, CSRs Interconnect
         periph_ico = router.Router(self, 'periph_ico', bandwidth=4)
 
+        ###################
+        ## INTERCONNECTS ##
+        ###################
+
+        # Binary loader
+        loader.o_OUT(instr_router.i_INPUT())
+        loader.o_START(cluster_regs.i_INST_PREHEAT_DONE())
+        self.o_HBM_PRELOAD_DONE(cluster_regs.i_HBM_PRELOAD_DONE())
+
+        # Instruction router
+        instr_router.o_MAP(cluster_ico.i_INPUT())
+        instr_router.o_MAP(instr_mem.i_INPUT(), base=arch.insn_area.base, size=arch.insn_area.size, rm_base=True)
+
+        # Binding back to instruction memory if access needs
+        cluster_ico.o_MAP(instr_mem.i_INPUT(), base=arch.insn_area.base, size=arch.insn_area.size, rm_base=True)
+
+        # Loader entry -> mempool cluster (boot address for cores)
+        self.bind(loader, 'entry', mempool_cluster, 'loader_entry')
+
+        # Cluster registers fetch start -> mempool cluster (fetch enable for cores)
+        self.bind(cluster_regs, 'fetch_start', mempool_cluster, 'loader_start')
+
+        #DMA data
+        #To emulate distributed backends in groups
+        self.bind(dma, 'axi_read', mempool_cluster, 'dma_axi')
+        self.bind(dma, 'axi_write', mempool_cluster, 'dma_axi')
+        self.bind(dma, 'tcdm_read', mempool_cluster, 'dma_tcdm')
+        self.bind(dma, 'tcdm_write', mempool_cluster, 'dma_tcdm')
+
+        nb_axi_masters = arch.nb_axi_masters_per_group * arch.nb_groups
+
         # AXI Interconnect
         axi_ico = []
         for i in range(0, nb_axi_masters):
             axi_ico.append(router.Router(self, f'axi_ico_{i}', latency=0))
-            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, rm_base=False, size=0x1000000)
+            axi_ico[i].o_MAP(wide_soc_router.i_INPUT(), base=0x80000000, remove_offset=0x80000000, size=0x1000000)
             axi_ico[i].o_MAP(cluster_ico.i_INPUT(), rm_base=False)
             self.bind(mempool_cluster, 'axi_%d' % i, axi_ico[i], 'input')
 
         # Router -> Cluster wide SoC port
         wide_soc_router.o_MAP(self.i_WIDE_SOC())
-
-        # L3 Mapping across the NoC for all clusters
-        itf_l3 = router.Router(self, 'l3_router')
-        cluster_ico.o_MAP(itf_l3.i_INPUT(), base=arch.insn_base, size=arch.insn_size)
-        itf_l3.o_MAP(l3_mem.i_INPUT())
-
 
         # cluster interconnect -> Bootrom
         cluster_ico.o_MAP(rom.i_INPUT(), base=0xa0000000, size=0x10000, latency=1, rm_base=True)
@@ -178,29 +195,9 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # narrow_soc
         periph_ico.o_MAP(self.i_NARROW_SOC())
+        self.o_NARROW_INPUT(periph_ico.i_INPUT())
 
         ## SYNCHRONIZATION
-
-        # Per-cluster binary loader
-        loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary)
-
-        # Loader router for directing binary sections to appropriate memories
-        loader_router = router.Router(self, 'loader_router', bandwidth=8, latency=1)
-        loader.o_OUT(loader_router.i_INPUT())
-        loader_router.o_MAP(rom.i_INPUT(), base=0xa0000000, size=0x10000, rm_base=True)
-        loader_router.o_MAP(wide_soc_router.i_INPUT())
-
-        # Loader start -> cluster registers (instruction preheat done)
-        loader.o_START(cluster_regs.i_INST_PREHEAT_DONE())
-
-        # Loader entry -> mempool cluster (boot address for cores)
-        self.bind(loader, 'entry', mempool_cluster, 'loader_entry')
-
-        # HBM preload done -> cluster registers
-        self.o_HBM_PRELOAD_DONE(cluster_regs.i_HBM_PRELOAD_DONE())
-
-        # Cluster registers fetch start -> mempool cluster (fetch enable for cores)
-        self.bind(cluster_regs, 'fetch_start', mempool_cluster, 'loader_start')
 
       	#Cluster Registers for synchronization barrier
         for i in range(0, arch.total_cores):
