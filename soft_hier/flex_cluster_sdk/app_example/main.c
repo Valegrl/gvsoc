@@ -3,5 +3,6 @@
 
 int main()
 {
+    flex_eoc(0);
     return 0;
 }

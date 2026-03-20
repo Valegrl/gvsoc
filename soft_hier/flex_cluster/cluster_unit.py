@@ -152,6 +152,11 @@ class ClusterUnit(gvsoc.systree.Component):
         soc_ico = router.Router(self, 'soc_ico')    # TODO: output bandwidth only
         soc_ico.add_mapping('bootrom', base=0xa0000000, remove_offset=0xa0000000, size=0x10000, latency=1)
         soc_ico.add_mapping('peripheral', base=0x40000000, size=0x20000, latency=1)
+        # Wide SoC path for remote cluster TCDM and HBM accesses via data NoC
+        soc_ico.add_mapping('wide_soc', base=0x30000000, size=0x10000000, latency=1)
+        soc_ico.add_mapping('wide_soc', base=0xc0000000, size=0x40000000, latency=1)
+        # Forward SoC control register window (e.g. EOC) to the narrow SoC path.
+        soc_ico.add_mapping('external', base=0x90000000, size=0x10000, latency=1)
 
         periph_ico = router.Router(self, 'periph_ico', bandwidth=4)
         periph_ico.add_mapping('csr', base=0x40000000, remove_offset=0x40000000, size=0x10000, latency=1)
@@ -165,10 +170,6 @@ class ClusterUnit(gvsoc.systree.Component):
         ## INTERCONNECTS ##
         ###################
 
-        # narrow_soc
-        periph_ico.o_MAP(self.i_NARROW_SOC())
-        self.o_NARROW_INPUT(periph_ico.i_INPUT())
-
         # Group axi port -> axi interconnect
         for i in range(0, nb_axi_masters):
             self.bind(mempool_cluster, 'axi_%d' % i, axi_ico[i], 'input')
@@ -179,6 +180,13 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # Peripheral interconnect
         self.bind(soc_ico, 'peripheral', periph_ico, 'input')
+
+        # FlexCluster virtual router interconnect
+        self.bind(soc_ico, 'external', self, 'narrow_soc')
+        self.o_NARROW_INPUT(soc_ico.i_INPUT())
+
+        # wide_soc (remote cluster TCDM and HBM via data NoC)
+        self.bind(soc_ico, 'wide_soc', self, 'wide_soc')
 
         # Bootrom
         self.bind(soc_ico, 'bootrom', rom, 'input')
@@ -225,6 +233,18 @@ class ClusterUnit(gvsoc.systree.Component):
         self.bind(dma, 'tcdm_read', mempool_cluster, 'dma_tcdm')
         self.bind(dma, 'tcdm_write', mempool_cluster, 'dma_tcdm')
 
+        # Wide input from data_noc -> MemPool TCDM (remote cluster access)
+        wide_axi_goto_tcdm = router.Router(self, 'wide_axi_goto_tcdm')
+        wide_axi_goto_tcdm.add_mapping('output')
+        self.o_WIDE_INPUT(wide_axi_goto_tcdm.i_INPUT())
+        self.bind(wide_axi_goto_tcdm, 'output', mempool_cluster, 'dma_tcdm')
+
+    def i_WIDE_INPUT(self) -> gvsoc.systree.SlaveItf:
+        return gvsoc.systree.SlaveItf(self, 'wide_input', signature='io')
+
+    def o_WIDE_INPUT(self, itf: gvsoc.systree.SlaveItf):
+        self.itf_bind('wide_input', itf, signature='io', composite_bind=True)
+
     def i_WIDE_SOC(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'wide_soc', signature='io')
 
@@ -243,10 +263,16 @@ class ClusterUnit(gvsoc.systree.Component):
     def o_NARROW_SOC(self, itf: gvsoc.systree.SlaveItf):
         self.itf_bind('narrow_soc', itf, signature='io')
 
-    def i_GLOBAL_SYNC(self) -> gvsoc.systree.SlaveItf:
+    def i_SYNC_OUTPUT(self) -> gvsoc.systree.SlaveItf:
+        return gvsoc.systree.SlaveItf(self, 'sync_output', signature='io')
+
+    def o_SYNC_OUTPUT(self, itf: gvsoc.systree.SlaveItf):
+        self.itf_bind('sync_output', itf, signature='io')
+
+    def i_SYNC_INPUT(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, f'sync_input', signature='io')
 
-    def o_GLOBAL_SYNC(self, itf: gvsoc.systree.SlaveItf):
+    def o_SYNC_INPUT(self, itf: gvsoc.systree.SlaveItf):
         self.itf_bind('sync_input', itf, signature='io', composite_bind=True)
 
     def i_HBM_PRELOAD_DONE(self) -> gvsoc.systree.SlaveItf:
