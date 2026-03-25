@@ -45,7 +45,7 @@ all: checkout build
 checkout:
 	git submodule update --recursive --init
 
-.PHONY: build tmp_hw
+.PHONY: build tmp_hw config hw
 
 ifdef DEBUG
 BUILD_TYPE = RelWithDebInfo
@@ -233,9 +233,31 @@ endif
 
 arch_cmake_arg := $(shell if grep "spatz_attaced_core_list" $(config_file) | grep "\[\]" > /dev/null 2>&1; then echo "-DRISCV_ARCH=rv32imafd_zfh"; else echo "-DRISCV_ARCH=rv32imafdv_zfh"; fi)
 
+######################################################################
+## 				Mempool Config Integration							##
+######################################################################
+
+MEMPOOL_CMAKE_ARGS ?=
+ifdef config
+  MEMPOOL_DIR := $(CURDIR)
+  include $(CURDIR)/config/config.mk
+  MEMPOOL_CMAKE_ARGS := \
+    -DNUM_CORES=$(num_cores) \
+    -DNUM_GROUPS=$(num_groups) \
+    -DNUM_CORES_PER_TILE=$(num_cores_per_tile) \
+    -DBANKING_FACTOR=$(banking_factor) \
+    -DL1_BANK_SIZE=$(l1_bank_size) \
+    -DL2_BASE=$(l2_base) \
+    -DL2_SIZE=$(l2_size) \
+    -DSEQ_MEM_SIZE=$(seq_mem_size) \
+    -DSTACK_SIZE=$(stack_size) \
+    -DXQUEUE_SIZE=$(xqueue_size) \
+    -DBOOT_ADDR=$(boot_addr)
+endif
+
 sw:
 	rm -rf sw_build && mkdir sw_build
-	cd sw_build && $(CMAKE) $(sw_cmake_arg) $(arch_cmake_arg) ../soft_hier/flex_cluster_sdk/ && make
+	cd sw_build && $(CMAKE) $(sw_cmake_arg) $(arch_cmake_arg) $(MEMPOOL_CMAKE_ARGS) ../soft_hier/flex_cluster_sdk/ && make
 	@! grep -q "ebreak" sw_build/softhier.dump || (echo "Error: 'ebreak' found in sw_build/softhier.dump" && exit 1)
 
 clean_sw:
@@ -261,6 +283,9 @@ ifdef pld
 endif
 run:
 	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) --trace=/chip/cluster_0/mempool_cluster/group_0/tile_0/pe0 | tee sw_build/run_trace.txt
+
+run_only:
+	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run
 
 runv:
 	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) --trace=redmule --trace=idma --trace=spatz --trace=cluster_registers | tee sw_build/analyze_trace.txt

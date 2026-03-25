@@ -62,15 +62,18 @@ class Area:
 
 
 class ClusterArch:
-    def __init__(self,  nb_core_per_cluster, 
-                        base, 
+    def __init__(self,  nb_core_per_cluster,
+                        base,
                         cluster_id,
-                        reg_base,            
+                        reg_base,
                         reg_size,
-                        num_cluster_x,       
+                        num_cluster_x,
                         num_cluster_y,
                         insn_base,
-                        insn_size, 
+                        insn_size,
+                        sync_base=0x50000000,
+                        sync_interleave=0x80,
+                        sync_special_mem=0x40,
                         auto_fetch=False):
 
         self.base                   = base
@@ -93,6 +96,11 @@ class ClusterArch:
         #Global Information
         self.num_cluster_x          = num_cluster_x
         self.num_cluster_y          = num_cluster_y
+
+        # Sync bus parameters
+        self.sync_base              = sync_base
+        self.sync_interleave        = sync_interleave
+        self.sync_special_mem       = sync_special_mem
 
 class ClusterUnit(gvsoc.systree.Component):
 
@@ -117,8 +125,15 @@ class ClusterUnit(gvsoc.systree.Component):
         # Boot Rom
         rom = memory.Memory(self, 'rom', size=0x1000, width_log2=(arch.axi_data_width - 1).bit_length(), stim_file=self.get_file_path('pulp/chips/spatz/rom.bin'))
 
-        # Cluster CSRs
-        cluster_regs = ClusterRegisters(self, 'ctrl_registers', wakeup_latency=18 if arch.terapool else 15)
+        # Cluster CSRs (extended with inter-cluster barrier config)
+        cluster_regs = ClusterRegisters(self, 'ctrl_registers',
+            wakeup_latency=18 if arch.terapool else 15,
+            cluster_id=arch.cluster_id,
+            num_cluster_x=arch.num_cluster_x,
+            num_cluster_y=arch.num_cluster_y,
+            sync_base=arch.sync_base,
+            sync_interleave=arch.sync_interleave,
+            sync_special_mem=arch.sync_special_mem)
 
         # DMA
         dma = MemPoolDma(self, 'dma', loc_base=0x0, loc_size=0x400000, tcdm_width=arch.total_cores*arch.bank_factor*4)
@@ -157,6 +172,12 @@ class ClusterUnit(gvsoc.systree.Component):
         soc_ico.add_mapping('wide_soc', base=0xc0000000, size=0x40000000, latency=1)
         # Forward SoC control register window (e.g. EOC) to the narrow SoC path.
         soc_ico.add_mapping('external', base=0x90000000, size=0x10000, latency=1)
+        # Sync bus path for inter-cluster barrier atomics (ARCH_SYNC_BASE)
+        sync_total_size = (arch.sync_interleave + arch.sync_special_mem) * arch.num_cluster_x * arch.num_cluster_y
+        soc_ico.add_mapping('sync', base=arch.sync_base, size=sync_total_size, latency=1)
+        # Barrier config registers (ARCH_CLUSTER_REG_BASE)
+        soc_ico.add_mapping('barrier_regs', base=arch.reg_area.base, remove_offset=arch.reg_area.base,
+                            size=arch.reg_area.size, latency=1)
 
         periph_ico = router.Router(self, 'periph_ico', bandwidth=4)
         periph_ico.add_mapping('csr', base=0x40000000, remove_offset=0x40000000, size=0x10000, latency=1)
@@ -230,14 +251,49 @@ class ClusterUnit(gvsoc.systree.Component):
         #To emulate distributed backends in groups
         self.bind(dma, 'axi_read', mempool_cluster, 'dma_axi')
         self.bind(dma, 'axi_write', mempool_cluster, 'dma_axi')
-        self.bind(dma, 'tcdm_read', mempool_cluster, 'dma_tcdm')
-        self.bind(dma, 'tcdm_write', mempool_cluster, 'dma_tcdm')
 
-        # Wide input from data_noc -> MemPool TCDM (remote cluster access)
+        # TCDM arbiter: DMA + Data NoC share the mempool dma_tcdm port
+        tcdm_arbiter = router.Router(self, 'tcdm_arbiter')
+        tcdm_arbiter.add_mapping('output')
+        self.bind(tcdm_arbiter, 'output', mempool_cluster, 'dma_tcdm')
+
+        # DMA connects through arbiter
+        self.bind(dma, 'tcdm_read', tcdm_arbiter, 'input')
+        self.bind(dma, 'tcdm_write', tcdm_arbiter, 'input')
+
+        # Wide input from data_noc -> arbiter -> MemPool TCDM (remote cluster access)
         wide_axi_goto_tcdm = router.Router(self, 'wide_axi_goto_tcdm')
         wide_axi_goto_tcdm.add_mapping('output')
         self.o_WIDE_INPUT(wide_axi_goto_tcdm.i_INPUT())
-        self.bind(wide_axi_goto_tcdm, 'output', mempool_cluster, 'dma_tcdm')
+        self.bind(wide_axi_goto_tcdm, 'output', tcdm_arbiter, 'input')
+
+        ################
+        ## SYNC BUS   ##
+        ################
+
+        # Sync memory for barrier counters (atomics-capable)
+        sync_mem = memory.Memory(self, 'sync_mem', size=arch.sync_interleave, atomics=True, width_log2=2)
+
+        # Outgoing: soc_ico 'sync' -> sync_router_master -> SYNC_OUTPUT -> sync_bus
+        sync_router_master = router.Router(self, 'sync_router_master', bandwidth=4)
+        sync_router_master.add_mapping('output')
+        self.bind(soc_ico, 'sync', sync_router_master, 'input')
+        self.bind(sync_router_master, 'output', self, 'sync_output')
+
+        # cluster_regs global_barrier_master -> sync_router_master (outgoing wakeup)
+        self.bind(cluster_regs, 'global_barrier_master', sync_router_master, 'input')
+
+        # Incoming: SYNC_INPUT -> sync_router_slave -> sync_mem / global_barrier_slave
+        sync_router_slave = router.Router(self, 'sync_router_slave', bandwidth=4)
+        sync_router_slave.add_mapping('sync_mem', base=0, size=arch.sync_interleave)
+        sync_router_slave.add_mapping('special_mem', base=arch.sync_interleave,
+                                      remove_offset=arch.sync_interleave, size=arch.sync_special_mem)
+        self.o_SYNC_INPUT(sync_router_slave.i_INPUT())
+        self.bind(sync_router_slave, 'sync_mem', sync_mem, 'input')
+        self.bind(sync_router_slave, 'special_mem', cluster_regs, 'global_barrier_slave')
+
+        # Barrier config registers (0x20000000) mapping
+        self.bind(soc_ico, 'barrier_regs', cluster_regs, 'barrier_reg_input')
 
     def i_WIDE_INPUT(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'wide_input', signature='io')

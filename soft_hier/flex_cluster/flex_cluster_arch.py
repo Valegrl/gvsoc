@@ -56,6 +56,6 @@ class FlexClusterArch:
         self.soc_register_wakeup     = 0x90000004
 
         #Synchronization
-        self.sync_base               = 0x40000000
+        self.sync_base               = 0x50000000
         self.sync_interleave         = 0x00000080
         self.sync_special_mem        = 0x00000040

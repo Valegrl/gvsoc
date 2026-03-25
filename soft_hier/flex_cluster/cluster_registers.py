@@ -18,14 +18,22 @@ import gvsoc.systree
 
 class ClusterRegisters(gvsoc.systree.Component):
 
-    def __init__(self, parent: gvsoc.systree.Component, name: str, wakeup_latency: int=0):
+    def __init__(self, parent: gvsoc.systree.Component, name: str, wakeup_latency: int=0,
+                 cluster_id: int=0, num_cluster_x: int=1, num_cluster_y: int=1,
+                 sync_base: int=0x50000000, sync_interleave: int=0x80, sync_special_mem: int=0x40):
 
         super().__init__(parent, name)
 
         self.add_sources(['pulp/chips/flex_cluster/cluster_registers.cpp'])
 
         self.add_properties({
-            'wakeup_latency': wakeup_latency
+            'wakeup_latency': wakeup_latency,
+            'cluster_id': cluster_id,
+            'num_cluster_x': num_cluster_x,
+            'num_cluster_y': num_cluster_y,
+            'sync_base': sync_base,
+            'sync_interleave': sync_interleave,
+            'sync_special_mem': sync_special_mem,
         })
 
     def i_INPUT(self) -> gvsoc.systree.SlaveItf:
@@ -42,3 +50,12 @@ class ClusterRegisters(gvsoc.systree.Component):
 
     def o_FETCH_START(self, itf: gvsoc.systree.SlaveItf):
         self.itf_bind(f'fetch_start', itf, signature='wire<bool>')
+
+    def i_BARRIER_REG_INPUT(self) -> gvsoc.systree.SlaveItf:
+        return gvsoc.systree.SlaveItf(self, 'barrier_reg_input', signature='io')
+
+    def o_GLOBAL_BARRIER_MASTER(self, itf: gvsoc.systree.SlaveItf):
+        self.itf_bind('global_barrier_master', itf, signature='io')
+
+    def i_GLOBAL_BARRIER_SLAVE(self) -> gvsoc.systree.SlaveItf:
+        return gvsoc.systree.SlaveItf(self, 'global_barrier_slave', signature='io')
