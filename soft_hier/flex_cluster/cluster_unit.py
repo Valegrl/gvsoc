@@ -240,10 +240,6 @@ class ClusterUnit(gvsoc.systree.Component):
         self.bind(loader_router, 'csr', cluster_regs, 'input')
         self.bind(loader_router, 'dummy', dummy_mem, 'input')
 
-        #Cluster Registers for synchronization barrier
-        for i in range(0, arch.total_cores):
-            self.bind(cluster_regs, f'barrier_ack', mempool_cluster, f'barrier_ack_{i}')
-
         #L2 ro-cache configuration
         self.bind(cluster_regs, 'rocache_cfg', mempool_cluster, 'rocache_cfg')
 
@@ -262,14 +258,15 @@ class ClusterUnit(gvsoc.systree.Component):
         self.bind(dma, 'tcdm_write', tcdm_arbiter, 'input')
 
         # Wide input from data_noc -> arbiter -> MemPool TCDM (remote cluster access)
-        wide_axi_goto_tcdm = router.Router(self, 'wide_axi_goto_tcdm')
-        wide_axi_goto_tcdm.add_mapping('output')
-        self.o_WIDE_INPUT(wide_axi_goto_tcdm.i_INPUT())
-        self.bind(wide_axi_goto_tcdm, 'output', tcdm_arbiter, 'input')
+        self.o_WIDE_INPUT(tcdm_arbiter.i_INPUT())
 
         ################
         ## SYNC BUS   ##
         ################
+
+        #Cluster Registers for synchronization barrier
+        for i in range(0, arch.total_cores):
+            self.bind(cluster_regs, f'barrier_ack', mempool_cluster, f'barrier_ack_{i}')
 
         # Sync memory for barrier counters (atomics-capable)
         sync_mem = memory.Memory(self, 'sync_mem', size=arch.sync_interleave, atomics=True, width_log2=2)
