@@ -101,6 +101,7 @@ class ClusterArch:
         self.sync_base              = sync_base
         self.sync_interleave        = sync_interleave
         self.sync_special_mem       = sync_special_mem
+        self.sync_area              = Area(sync_base, sync_interleave + sync_special_mem)
 
 class ClusterUnit(gvsoc.systree.Component):
 
@@ -172,9 +173,6 @@ class ClusterUnit(gvsoc.systree.Component):
         soc_ico.add_mapping('wide_soc', base=0xc0000000, size=0x40000000, latency=1)
         # Forward SoC control register window (e.g. EOC) to the narrow SoC path.
         soc_ico.add_mapping('external', base=0x90000000, size=0x10000, latency=1)
-        # Sync bus path for inter-cluster barrier atomics (ARCH_SYNC_BASE)
-        sync_total_size = (arch.sync_interleave + arch.sync_special_mem) * arch.num_cluster_x * arch.num_cluster_y
-        soc_ico.add_mapping('sync', base=arch.sync_base, size=sync_total_size, latency=1)
         # Barrier config registers (ARCH_CLUSTER_REG_BASE)
         soc_ico.add_mapping('barrier_regs', base=arch.reg_area.base, remove_offset=arch.reg_area.base,
                             size=arch.reg_area.size, latency=1)
@@ -273,21 +271,20 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # Outgoing: soc_ico 'sync' -> sync_router_master -> SYNC_OUTPUT -> sync_bus
         sync_router_master = router.Router(self, 'sync_router_master', bandwidth=4)
-        sync_router_master.add_mapping('output')
-        self.bind(soc_ico, 'sync', sync_router_master, 'input')
-        self.bind(sync_router_master, 'output', self, 'sync_output')
+        sync_router_master.o_MAP(self.i_SYNC_OUTPUT())
+        soc_ico.o_MAP(sync_router_master.i_INPUT(), base=arch.sync_area.base, size=arch.sync_area.size*arch.num_cluster_x*arch.num_cluster_y, rm_base=False)
 
         # cluster_regs global_barrier_master -> sync_router_master (outgoing wakeup)
-        self.bind(cluster_regs, 'global_barrier_master', sync_router_master, 'input')
+        cluster_regs.o_GLOBAL_BARRIER_MASTER(sync_router_master.i_INPUT())
 
         # Incoming: SYNC_INPUT -> sync_router_slave -> sync_mem / global_barrier_slave
         sync_router_slave = router.Router(self, 'sync_router_slave', bandwidth=4)
-        sync_router_slave.add_mapping('sync_mem', base=0, size=arch.sync_interleave)
-        sync_router_slave.add_mapping('special_mem', base=arch.sync_interleave,
-                                      remove_offset=arch.sync_interleave, size=arch.sync_special_mem)
         self.o_SYNC_INPUT(sync_router_slave.i_INPUT())
-        self.bind(sync_router_slave, 'sync_mem', sync_mem, 'input')
-        self.bind(sync_router_slave, 'special_mem', cluster_regs, 'global_barrier_slave')
+        sync_router_slave.add_mapping('sync_mem')
+        self.bind(sync_router_slave, f'sync_mem', sync_mem, f'input')
+
+        # sync_router_slave -> cluster_regs global_barrier_slave (incoming wakeup)
+        sync_router_slave.o_MAP(cluster_regs.i_GLOBAL_BARRIER_SLAVE(), base=arch.sync_interleave, size=arch.sync_special_mem, rm_base=True)
 
         # Barrier config registers (0x20000000) mapping
         self.bind(soc_ico, 'barrier_regs', cluster_regs, 'barrier_reg_input')

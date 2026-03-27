@@ -38,9 +38,18 @@ class ClusterRegisters(gvsoc.systree.Component):
 
     def i_INPUT(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'input', signature='io')
-    
+
     def o_BARRIER_ACK(self, itf: gvsoc.systree.SlaveItf):
-        self.itf_bind(f'barrier_ack', itf, signature='io')
+        self.itf_bind('barrier_ack', itf, signature='wire<bool>')
+    
+    def gen_gui(self, parent_signal):
+        return gvsoc.gui.Signal(self, parent_signal, name=self.name, is_group=True, groups=["regmap"])
+
+    def i_GLOBAL_BARRIER_SLAVE(self) -> gvsoc.systree.SlaveItf:
+        return gvsoc.systree.SlaveItf(self, 'global_barrier_slave', signature='io')
+    
+    def o_GLOBAL_BARRIER_MASTER(self, itf: gvsoc.systree.SlaveItf):
+        self.itf_bind('global_barrier_master', itf, signature='io')
 
     def i_HBM_PRELOAD_DONE(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'hbm_preload_done', signature='wire<bool>')
@@ -53,9 +62,3 @@ class ClusterRegisters(gvsoc.systree.Component):
 
     def i_BARRIER_REG_INPUT(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'barrier_reg_input', signature='io')
-
-    def o_GLOBAL_BARRIER_MASTER(self, itf: gvsoc.systree.SlaveItf):
-        self.itf_bind('global_barrier_master', itf, signature='io')
-
-    def i_GLOBAL_BARRIER_SLAVE(self) -> gvsoc.systree.SlaveItf:
-        return gvsoc.systree.SlaveItf(self, 'global_barrier_slave', signature='io')
