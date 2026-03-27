@@ -202,7 +202,11 @@ uint32_t flex_amo_fetch_add(uint32_t* barrier){
 void flex_intra_cluster_sync(){
 #ifdef NUM_CORES
     // Mempool-based cluster: use mempool_barrier for intra-cluster sync
-    mempool_barrier(NUM_CORES);
+    uint32_t core_id = mempool_get_core_id();
+    uint32_t num_cores = mempool_get_core_count();
+    // Initialize synchronization variables
+    mempool_barrier_init(core_id);
+    mempool_barrier(num_cores);
 #else
     // Snitch-based cluster: use hardware barrier CSR
     asm volatile("csrr x0, 0x7C2" ::: "memory");
