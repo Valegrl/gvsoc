@@ -182,8 +182,7 @@ class ClusterUnit(gvsoc.systree.Component):
         periph_ico.add_mapping('dma_ctrl', base=0x40010000, remove_offset=0x40010000, size=0x10000, latency=1)
 
         # Binary Loader Router
-        loader_router = router.Router(self, 'loader_router', bandwidth=32, latency=1)
-        loader_router.add_mapping('output')
+        loader_router = router.Router(self, 'loader_router', bandwidth=8*arch.total_cores)
 
         ###################
         ## INTERCONNECTS ##
@@ -221,14 +220,13 @@ class ClusterUnit(gvsoc.systree.Component):
         self.bind(periph_ico, 'dma_ctrl', dma, 'input')
 
         # Binary loader
-        loader.o_OUT(instr_router.i_INPUT())
+        loader.o_OUT(loader_router.i_INPUT())
+        self.bind(loader, 'entry', mempool_cluster, 'loader_entry')
         loader.o_START(cluster_regs.i_INST_PREHEAT_DONE())
+        self.bind(cluster_regs, 'fetch_start', mempool_cluster, 'loader_start')   
         self.o_HBM_PRELOAD_DONE(cluster_regs.i_HBM_PRELOAD_DONE())
 
         #loader router
-        self.bind(cluster_regs, 'fetch_start', mempool_cluster, 'loader_start')
-        self.bind(loader, 'entry', mempool_cluster, 'loader_entry')
-        self.bind(loader, 'out', loader_router, 'input')
         loader_router.add_mapping('dummy', base=0x00000000, remove_offset=0x00000000, size=0x400000)
         loader_router.add_mapping('mem', base=0x80000000, remove_offset=0x80000000, size=0x1000000)
         loader_router.add_mapping('rom', base=0xa0000000, remove_offset=0xa0000000, size=0x1000)
