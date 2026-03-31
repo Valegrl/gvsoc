@@ -64,6 +64,7 @@ class Area:
 class ClusterArch:
     def __init__(self,  nb_core_per_cluster,
                         base,
+                        tcdm_size,
                         cluster_id,
                         reg_base,
                         reg_size,
@@ -71,12 +72,21 @@ class ClusterArch:
                         num_cluster_y,
                         insn_base,
                         insn_size,
+                        terapool,
+                        nb_cores_per_tile,
+                        nb_sub_groups_per_group,
+                        nb_groups,
+                        bank_factor,
+                        axi_data_width,
+                        nb_axi_masters_per_group,
+                        nb_l2_banks,
                         sync_base=0x50000000,
                         sync_interleave=0x80,
                         sync_special_mem=0x40,
                         auto_fetch=False):
 
         self.base                   = base
+        self.tcdm_size              = tcdm_size
         self.cluster_id             = cluster_id
         self.auto_fetch             = auto_fetch
         self.reg_area               = Area(reg_base, reg_size)
@@ -84,14 +94,15 @@ class ClusterArch:
 
         # Cluster configuration
         self.async_l1_interco           = False
-        self.terapool                   = False
-        self.nb_cores_per_tile          = 4
-        self.nb_sub_groups_per_group    = 1
-        self.nb_groups                  = 4
+        self.terapool                   = terapool
+        self.nb_cores_per_tile          = nb_cores_per_tile
+        self.nb_sub_groups_per_group    = nb_sub_groups_per_group
+        self.nb_groups                  = nb_groups
         self.total_cores                = nb_core_per_cluster
-        self.bank_factor                = 4
-        self.axi_data_width             = 64
-        self.nb_axi_masters_per_group   = 1
+        self.bank_factor                = bank_factor
+        self.axi_data_width             = axi_data_width
+        self.nb_axi_masters_per_group   = nb_axi_masters_per_group
+        self.nb_l2_banks                = nb_l2_banks
 
         #Global Information
         self.num_cluster_x          = num_cluster_x
@@ -137,20 +148,20 @@ class ClusterUnit(gvsoc.systree.Component):
             sync_special_mem=arch.sync_special_mem)
 
         # DMA
-        dma = MemPoolDma(self, 'dma', loc_base=0x0, loc_size=0x400000, tcdm_width=arch.total_cores*arch.bank_factor*4)
+        dma = MemPoolDma(self, 'dma', loc_base=arch.base, loc_size=arch.tcdm_size, tcdm_width=arch.total_cores*arch.bank_factor*4)
 
         # Binary Loader
-        loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary, entry=0x80000000)
+        loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary, entry=arch.insn_area.base)
 
         # Originally part of the L3 instruction memory logic in soft_hier/cluster_unit.py
         # L2 Memory
         # Efficient bandwidth of each port is only 1/4 of axi_data_width in current design
-        l2_mem = L2_subsystem(self, 'l2_mem', nb_banks=16 if arch.terapool else 4, 
-                              bank_width=arch.axi_data_width, size=0x1000000 if arch.terapool else 0x400000, 
+        l2_mem = L2_subsystem(self, 'l2_mem', nb_banks=arch.nb_l2_banks,
+                              bank_width=arch.axi_data_width, size=arch.insn_area.size,
                               nb_masters=nb_axi_masters, port_bandwidth=arch.axi_data_width//4)
         
         #Dummy Memory
-        dummy_mem = memory.Memory(self, 'dummy_mem', atomics=True, size=0x400000)
+        dummy_mem = memory.Memory(self, 'dummy_mem', atomics=True, size=arch.tcdm_size)
 
         # Instruction router
         instr_router = router.Router(self, 'instr_router', bandwidth=8*arch.total_cores)
@@ -162,15 +173,12 @@ class ClusterUnit(gvsoc.systree.Component):
         axi_ico = []
         for i in range(0, nb_axi_masters):
             axi_ico.append(router.Router(self, f'axi_ico_{i}', latency=0))
-            axi_ico[i].add_mapping('l2', base=0x80000000, remove_offset=0x80000000, size=0x1000000)
+            axi_ico[i].add_mapping('l2', base=arch.insn_area.base, remove_offset=arch.insn_area.base, size=arch.insn_area.size)
             axi_ico[i].add_mapping('soc')
 
         soc_ico = router.Router(self, 'soc_ico')    # TODO: output bandwidth only
         soc_ico.add_mapping('bootrom', base=0xa0000000, remove_offset=0xa0000000, size=0x10000, latency=1)
         soc_ico.add_mapping('peripheral', base=0x40000000, size=0x20000, latency=1)
-        # Wide SoC path for remote cluster TCDM and HBM accesses via data NoC
-        soc_ico.add_mapping('wide_soc', base=0x30000000, size=0x10000000, latency=1)
-        soc_ico.add_mapping('wide_soc', base=0xc0000000, size=0x40000000, latency=1)
         # Forward SoC control register window (e.g. EOC) to the narrow SoC path.
         soc_ico.add_mapping('external', base=0x90000000, size=0x10000, latency=1)
         # Barrier config registers (ARCH_CLUSTER_REG_BASE)
@@ -203,9 +211,6 @@ class ClusterUnit(gvsoc.systree.Component):
         self.bind(soc_ico, 'external', self, 'narrow_soc')
         self.o_NARROW_INPUT(soc_ico.i_INPUT())
 
-        # wide_soc (remote cluster TCDM and HBM via data NoC)
-        self.bind(soc_ico, 'wide_soc', self, 'wide_soc')
-
         # Bootrom
         self.bind(soc_ico, 'bootrom', rom, 'input')
 
@@ -227,8 +232,8 @@ class ClusterUnit(gvsoc.systree.Component):
         self.o_HBM_PRELOAD_DONE(cluster_regs.i_HBM_PRELOAD_DONE())
 
         #loader router
-        loader_router.add_mapping('dummy', base=0x00000000, remove_offset=0x00000000, size=0x400000)
-        loader_router.add_mapping('mem', base=0x80000000, remove_offset=0x80000000, size=0x1000000)
+        loader_router.add_mapping('dummy', base=arch.base, remove_offset=arch.base, size=arch.tcdm_size)
+        loader_router.add_mapping('mem', base=arch.insn_area.base, remove_offset=arch.insn_area.base, size=arch.insn_area.size)
         loader_router.add_mapping('rom', base=0xa0000000, remove_offset=0xa0000000, size=0x1000)
         loader_router.add_mapping('csr', base=0x40000000, remove_offset=0x40000000, size=0x10000)
         self.bind(loader_router, 'mem', l2_mem, 'input_loader')
@@ -241,20 +246,20 @@ class ClusterUnit(gvsoc.systree.Component):
 
         #DMA data
         #To emulate distributed backends in groups
-        self.bind(dma, 'axi_read', mempool_cluster, 'dma_axi')
-        self.bind(dma, 'axi_write', mempool_cluster, 'dma_axi')
+        self.bind(dma, 'tcdm_read', mempool_cluster, 'dma_tcdm')
+        self.bind(dma, 'tcdm_write', mempool_cluster, 'dma_tcdm')
 
-        # TCDM arbiter: DMA + Data NoC share the mempool dma_tcdm port
-        tcdm_arbiter = router.Router(self, 'tcdm_arbiter')
-        tcdm_arbiter.add_mapping('output')
-        self.bind(tcdm_arbiter, 'output', mempool_cluster, 'dma_tcdm')
+        # Wire router for incoming remote cluster TCDM accesses via data NoC
+        wide_axi_goto_tcdm = router.Router(self, 'wide_axi_goto_tcdm')
+        self.o_WIDE_INPUT(wide_axi_goto_tcdm.i_INPUT())
+        wide_axi_goto_tcdm.add_mapping('dma_axi')
+        self.bind(wide_axi_goto_tcdm, 'dma_axi', mempool_cluster, 'dma_axi')
 
-        # DMA connects through arbiter
-        self.bind(dma, 'tcdm_read', tcdm_arbiter, 'input')
-        self.bind(dma, 'tcdm_write', tcdm_arbiter, 'input')
-
-        # Wide input from data_noc -> arbiter -> MemPool TCDM (remote cluster access)
-        self.o_WIDE_INPUT(tcdm_arbiter.i_INPUT())
+        # Wide SoC path for remote cluster TCDM and HBM accesses via data NoC
+        wide_axi_from_idma = router.Router(self, 'wide_axi_from_idma')
+        wide_axi_from_idma.o_MAP(self.i_WIDE_SOC())
+        self.bind(dma, 'axi_read', wide_axi_from_idma, 'input')
+        self.bind(dma, 'axi_write', wide_axi_from_idma, 'input')
 
         ################
         ## SYNC BUS   ##

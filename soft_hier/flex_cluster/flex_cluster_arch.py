@@ -23,7 +23,6 @@ class FlexClusterArch:
         #Cluster
         self.num_cluster_x           = 2
         self.num_cluster_y           = 2
-        self.num_core_per_cluster    = 16
 
         self.cluster_tcdm_base       = 0x00000000
         self.cluster_tcdm_size       = 0x00100000
@@ -34,6 +33,44 @@ class FlexClusterArch:
 
         self.cluster_reg_base        = 0x20000000
         self.cluster_reg_size        = 0x00000200
+
+        self.instruction_mem_base    = 0x80000000
+
+        # Mempool cluster configuration (Minpool)
+        self.terapool                    = False
+        self.num_core_per_cluster        = 16
+        self.nb_cores_per_tile           = 4
+        self.nb_sub_groups_per_group     = 1
+        self.nb_groups                   = 4
+        self.bank_factor                 = 4
+        self.axi_data_width              = 32
+        self.nb_axi_masters_per_group    = 1
+        self.instruction_mem_size        = 0x400000
+        self.nb_l2_banks                 = 4
+
+        # # Mempool cluster configuration (Mempool)
+        # self.terapool                    = False
+        # self.num_core_per_cluster        = 256
+        # self.nb_cores_per_tile           = 4
+        # self.nb_sub_groups_per_group     = 1
+        # self.nb_groups                   = 4
+        # self.bank_factor                 = 4
+        # self.axi_data_width              = 64
+        # self.nb_axi_masters_per_group    = 1
+        # self.instruction_mem_size        = 0x400000
+        # self.nb_l2_banks                 = 4
+
+        # # Mempool cluster configuration (Terapool)
+        # self.terapool                    = True
+        # self.num_core_per_cluster        = 1024
+        # self.nb_cores_per_tile           = 8
+        # self.nb_sub_groups_per_group     = 4
+        # self.nb_groups                   = 4
+        # self.bank_factor                 = 4
+        # self.axi_data_width              = 64
+        # self.nb_axi_masters_per_group    = 4
+        # self.instruction_mem_size        = 0x1000000
+        # self.nb_l2_banks                 = 16
 
         #HBM
         self.hbm_start_base          = 0xc0000000
@@ -47,9 +84,6 @@ class FlexClusterArch:
         self.noc_link_width          = 512
 
         #System
-        self.instruction_mem_base    = 0x80000000
-        self.instruction_mem_size    = 0x00010000
-
         self.soc_register_base       = 0x90000000
         self.soc_register_size       = 0x00010000
         self.soc_register_eoc        = 0x90000000

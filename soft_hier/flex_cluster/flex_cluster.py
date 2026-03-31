@@ -110,18 +110,27 @@ class FlexClusterSystem(gvsoc.systree.Component):
         #Clusters
         cluster_list=[]
         for cluster_id in range(num_clusters):
-            cluster_arch = ClusterArch( nb_core_per_cluster =   arch.num_core_per_cluster,
-                                        base                =   arch.cluster_tcdm_base,
-                                        cluster_id          =   cluster_id,
-                                        reg_base            =   arch.cluster_reg_base,
-                                        reg_size            =   arch.cluster_reg_size,
-                                        num_cluster_x       =   arch.num_cluster_x,
-                                        num_cluster_y       =   arch.num_cluster_y,
-                                        insn_base           =   arch.instruction_mem_base,
-                                        insn_size           =   arch.instruction_mem_size,
-                                        sync_base           =   arch.sync_base,
-                                        sync_interleave     =   arch.sync_interleave,
-                                        sync_special_mem    =   arch.sync_special_mem)
+            cluster_arch = ClusterArch( nb_core_per_cluster     =   arch.num_core_per_cluster,
+                                        base                    =   arch.cluster_tcdm_base,
+                                        tcdm_size               =   arch.cluster_tcdm_size,
+                                        cluster_id              =   cluster_id,
+                                        reg_base                =   arch.cluster_reg_base,
+                                        reg_size                =   arch.cluster_reg_size,
+                                        num_cluster_x           =   arch.num_cluster_x,
+                                        num_cluster_y           =   arch.num_cluster_y,
+                                        insn_base               =   arch.instruction_mem_base,
+                                        insn_size               =   arch.instruction_mem_size,
+                                        terapool                =   arch.terapool,
+                                        nb_cores_per_tile       =   arch.nb_cores_per_tile,
+                                        nb_sub_groups_per_group =   arch.nb_sub_groups_per_group,
+                                        nb_groups               =   arch.nb_groups,
+                                        bank_factor             =   arch.bank_factor,
+                                        axi_data_width          =   arch.axi_data_width,
+                                        nb_axi_masters_per_group=   arch.nb_axi_masters_per_group,
+                                        nb_l2_banks             =   arch.nb_l2_banks,
+                                        sync_base               =   arch.sync_base,
+                                        sync_interleave         =   arch.sync_interleave,
+                                        sync_special_mem        =   arch.sync_special_mem)
 
             cluster_list.append(ClusterUnit(self,f'cluster_{cluster_id}', cluster_arch, binary, parser))
             pass
