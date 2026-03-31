@@ -80,9 +80,9 @@ class ClusterArch:
                         axi_data_width,
                         nb_axi_masters_per_group,
                         nb_l2_banks,
-                        sync_base=0x50000000,
-                        sync_interleave=0x80,
-                        sync_special_mem=0x40,
+                        sync_base,
+                        sync_interleave,
+                        sync_special_mem,
                         auto_fetch=False):
 
         self.base                   = base
@@ -162,9 +162,6 @@ class ClusterUnit(gvsoc.systree.Component):
         
         #Dummy Memory
         dummy_mem = memory.Memory(self, 'dummy_mem', atomics=True, size=arch.tcdm_size)
-
-        # Instruction router
-        instr_router = router.Router(self, 'instr_router', bandwidth=8*arch.total_cores)
 
         # DMA, CSRs Interconnect
         periph_ico = router.Router(self, 'periph_ico', bandwidth=4)
