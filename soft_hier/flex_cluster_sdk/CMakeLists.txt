@@ -81,6 +81,7 @@ if(NOT NUM_CORES EQUAL 0)
 
     # Build define string for preprocessor
     set(MEMPOOL_DEFINES
+        -DMEMPOOL_CLUSTER_UNIT
         -DNUM_CORES=${NUM_CORES}
         -DNUM_GROUPS=${NUM_GROUPS}
         -DNUM_CORES_PER_TILE=${NUM_CORES_PER_TILE}

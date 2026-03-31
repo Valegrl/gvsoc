@@ -12,9 +12,6 @@ Dynamic memory allocation based on linked list of free memory blocks
 #ifndef _FLEX_ALLOC_H_
 #define _FLEX_ALLOC_H_
 
-// Prevent mempool's alloc.h from being included (same types, conflicting defs)
-#define _ALLOC_H_
-
 #include <stdint.h>
 #include "flex_printf.h"
 #include "flex_cluster_arch.h"
@@ -79,16 +76,6 @@ alloc_t *flex_get_allocator_hbm();
 // [debug] print all free-memory-blocks in l1 heap
 void flex_dump_heap();
 
-// Mempool compatibility wrappers
-// (mempool's runtime.h mempool_init() references these)
-static inline void alloc_init(alloc_t *alloc, void *base, const uint32_t size) {
-  flex_cluster_alloc_init(alloc, base, size);
-}
-static inline alloc_t *get_alloc_l1() { return flex_get_allocator_l1(); }
-alloc_t *get_alloc_tile(const uint32_t tile_id);
-static inline void *simple_malloc(const uint32_t size) { return flex_l1_malloc(size); }
-static inline void simple_free(void *const ptr) { flex_l1_free(ptr); }
-static inline void alloc_dump(alloc_t *alloc) { flex_dump_heap(); }
 
 
 /********************

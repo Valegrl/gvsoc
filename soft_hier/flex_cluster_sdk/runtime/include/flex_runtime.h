@@ -4,8 +4,20 @@
 #include "flex_cluster_arch.h"
 #include "flex_alloc.h"
 
-#ifdef NUM_CORES
+#ifdef MEMPOOL_CLUSTER_UNIT
+// Prevent mempool's alloc.h from being included (same types, conflicting defs)
+#define _ALLOC_H_
 #include "encoding.h"
+// Mempool compatibility wrappers
+// (must be declared before runtime.h, which calls them inside mempool_init())
+static inline void alloc_init(alloc_t *alloc, void *base, const uint32_t size) {
+  flex_cluster_alloc_init(alloc, base, size);
+}
+static inline alloc_t *get_alloc_l1() { return flex_get_allocator_l1(); }
+alloc_t *get_alloc_tile(const uint32_t tile_id);
+static inline void *simple_malloc(const uint32_t size) { return flex_l1_malloc(size); }
+static inline void simple_free(void *const ptr) { flex_l1_free(ptr); }
+static inline void alloc_dump(alloc_t *alloc) { flex_dump_heap(); }
 #include "runtime.h"
 #include "synchronization.h"
 #endif
@@ -200,7 +212,7 @@ uint32_t flex_amo_fetch_add(uint32_t* barrier){
 }
 
 void flex_intra_cluster_sync(){
-#ifdef NUM_CORES
+#ifdef MEMPOOL_CLUSTER_UNIT
     // Mempool-based cluster: use mempool_barrier for intra-cluster sync
     uint32_t core_id = mempool_get_core_id();
     uint32_t num_cores = mempool_get_core_count();
@@ -234,7 +246,7 @@ void flex_barrier_init(){
         if (flex_get_cluster_id() == 0)
         {
             flex_reset_barrier(barrier);
-#ifdef NUM_CORES
+#ifdef MEMPOOL_CLUSTER_UNIT
             // Mempool path: also reset the polling iteration counter
             volatile uint32_t * barrier_iter = (volatile uint32_t *) (ARCH_SYNC_BASE + 4);
             flex_reset_barrier(barrier_iter);
@@ -243,7 +255,7 @@ void flex_barrier_init(){
             flex_wakeup_all_clusters();
 #endif
         }
-#ifndef NUM_CORES
+#ifndef MEMPOOL_CLUSTER_UNIT
         // Snitch path: write to cluster_reg triggers barrier_ack for HW CSR barrier
         volatile uint32_t * cluster_reg  = (volatile uint32_t *) ARCH_CLUSTER_REG_BASE;
         *cluster_reg = flex_get_enable_value();
@@ -260,7 +272,7 @@ void flex_global_barrier(){
 
     if (flex_is_dm_core()){
         flex_annotate_barrier(0);
-#ifdef NUM_CORES
+#ifdef MEMPOOL_CLUSTER_UNIT
         // Mempool path: use polling to wait for all clusters (no wakeup needed)
         volatile uint32_t * barrier_iter = (volatile uint32_t *) (ARCH_SYNC_BASE + 4);
         uint32_t prev_barrier_iteration = *barrier_iter;
@@ -324,7 +336,7 @@ void flex_barrier_xy_init(){
                 volatile uint32_t * barrier_x = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,i)*ARCH_SYNC_SIZE)+8);
                 flex_reset_barrier(barrier_x);
             }
-#ifdef NUM_CORES
+#ifdef MEMPOOL_CLUSTER_UNIT
             // Mempool path: also reset xy polling iteration counters
             for (int i = 0; i < ARCH_NUM_CLUSTER_Y; ++i)
             {
@@ -337,7 +349,7 @@ void flex_barrier_xy_init(){
             flex_wakeup_all_clusters();
 #endif
         }
-#ifndef NUM_CORES
+#ifndef MEMPOOL_CLUSTER_UNIT
         volatile uint32_t * cluster_reg  = (volatile uint32_t *) ARCH_CLUSTER_REG_BASE;
         *cluster_reg = flex_get_enable_value();
 #endif
@@ -359,7 +371,7 @@ void flex_global_barrier_xy(){
         volatile uint32_t * barrier_x    = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos.y       )*ARCH_SYNC_SIZE)+8);
         volatile uint32_t * barrier_y    = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos_y_middel)*ARCH_SYNC_SIZE)+16);
 
-#ifdef NUM_CORES
+#ifdef MEMPOOL_CLUSTER_UNIT
         // Mempool path: use polling
         volatile uint32_t * barrier_ix   = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos.y       )*ARCH_SYNC_SIZE)+12);
         volatile uint32_t * barrier_iy   = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos_y_middel)*ARCH_SYNC_SIZE)+20);
