@@ -176,8 +176,6 @@ class ClusterUnit(gvsoc.systree.Component):
         soc_ico = router.Router(self, 'soc_ico')    # TODO: output bandwidth only
         soc_ico.add_mapping('bootrom', base=0xa0000000, remove_offset=0xa0000000, size=0x10000, latency=1)
         soc_ico.add_mapping('peripheral', base=0x40000000, size=0x20000, latency=1)
-        # Forward SoC control register window (e.g. EOC) to the narrow SoC path.
-        soc_ico.add_mapping('external', base=0x90000000, size=0x10000, latency=1)
         # Barrier config registers (ARCH_CLUSTER_REG_BASE)
         soc_ico.add_mapping('barrier_regs', base=arch.reg_area.base, remove_offset=arch.reg_area.base,
                             size=arch.reg_area.size, latency=1)
@@ -205,8 +203,9 @@ class ClusterUnit(gvsoc.systree.Component):
         self.bind(soc_ico, 'peripheral', periph_ico, 'input')
 
         # FlexCluster virtual router interconnect
-        self.bind(soc_ico, 'external', self, 'narrow_soc')
         self.o_NARROW_INPUT(soc_ico.i_INPUT())
+        # Forward SoC control register window (e.g. EOC) to the narrow SoC path.
+        soc_ico.o_MAP(self.i_NARROW_SOC())
 
         # Bootrom
         self.bind(soc_ico, 'bootrom', rom, 'input')
