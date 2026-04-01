@@ -38,6 +38,9 @@ class ClusterRegisters(gvsoc.systree.Component):
 
     def i_INPUT(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'input', signature='io')
+    
+    def i_BARRIER_REG_INPUT(self) -> gvsoc.systree.SlaveItf:
+        return gvsoc.systree.SlaveItf(self, 'barrier_reg_input', signature='io')
 
     def o_BARRIER_ACK(self, itf: gvsoc.systree.SlaveItf):
         self.itf_bind('barrier_ack', itf, signature='wire<bool>')
@@ -59,6 +62,3 @@ class ClusterRegisters(gvsoc.systree.Component):
 
     def o_FETCH_START(self, itf: gvsoc.systree.SlaveItf):
         self.itf_bind(f'fetch_start', itf, signature='wire<bool>')
-
-    def i_BARRIER_REG_INPUT(self) -> gvsoc.systree.SlaveItf:
-        return gvsoc.systree.SlaveItf(self, 'barrier_reg_input', signature='io')

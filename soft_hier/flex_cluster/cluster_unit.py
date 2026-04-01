@@ -163,9 +163,6 @@ class ClusterUnit(gvsoc.systree.Component):
         #Dummy Memory
         dummy_mem = memory.Memory(self, 'dummy_mem', atomics=True, size=arch.tcdm_size)
 
-        # DMA, CSRs Interconnect
-        periph_ico = router.Router(self, 'periph_ico', bandwidth=4)
-
         # AXI Interconnect
         axi_ico = []
         for i in range(0, nb_axi_masters):
@@ -173,19 +170,15 @@ class ClusterUnit(gvsoc.systree.Component):
             axi_ico[i].add_mapping('l2', base=arch.insn_area.base, remove_offset=arch.insn_area.base, size=arch.insn_area.size)
             axi_ico[i].add_mapping('soc')
 
-        soc_ico = router.Router(self, 'soc_ico')    # TODO: output bandwidth only
-        soc_ico.add_mapping('bootrom', base=0xa0000000, remove_offset=0xa0000000, size=0x10000, latency=1)
-        soc_ico.add_mapping('peripheral', base=0x40000000, size=0x20000, latency=1)
-        # Barrier config registers (ARCH_CLUSTER_REG_BASE)
-        soc_ico.add_mapping('barrier_regs', base=arch.reg_area.base, remove_offset=arch.reg_area.base,
-                            size=arch.reg_area.size, latency=1)
-
-        periph_ico = router.Router(self, 'periph_ico', bandwidth=4)
-        periph_ico.add_mapping('csr', base=0x40000000, remove_offset=0x40000000, size=0x10000, latency=1)
-        periph_ico.add_mapping('dma_ctrl', base=0x40010000, remove_offset=0x40010000, size=0x10000, latency=1)
+        narrow_axi = router.Router(self, 'narrow_axi', bandwidth=8)
+        narrow_axi.add_mapping('dummy', base=arch.base, remove_offset=arch.base, size=arch.tcdm_size)
+        narrow_axi.add_mapping('bootrom', base=0xa0000000, remove_offset=0xa0000000, size=0x10000, latency=1)
+        narrow_axi.add_mapping('csr_mempool_regs', base=0x40000000, remove_offset=0x40000000, size=0x10000, latency=1)
+        narrow_axi.add_mapping('dma_ctrl', base=0x40010000, remove_offset=0x40010000, size=0x10000, latency=1)
+        narrow_axi.add_mapping('csr_barrier_regs', base=arch.reg_area.base, remove_offset=arch.reg_area.base, size=arch.reg_area.size, latency=1)
 
         # Binary Loader Router
-        loader_router = router.Router(self, 'loader_router', bandwidth=8*arch.total_cores)
+        instr_router = router.Router(self, 'instr_router', bandwidth=8*arch.total_cores)
 
         ###################
         ## INTERCONNECTS ##
@@ -197,45 +190,43 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # SoC interconnect
         for i in range(0, nb_axi_masters):
-            self.bind(axi_ico[i], 'soc', soc_ico, 'input')
-
-        # Peripheral interconnect
-        self.bind(soc_ico, 'peripheral', periph_ico, 'input')
+            self.bind(axi_ico[i], 'soc', narrow_axi, 'input')
 
         # FlexCluster virtual router interconnect
-        self.o_NARROW_INPUT(soc_ico.i_INPUT())
+        self.o_NARROW_INPUT(narrow_axi.i_INPUT())
         # Forward SoC control register window (e.g. EOC) to the narrow SoC path.
-        soc_ico.o_MAP(self.i_NARROW_SOC())
+        narrow_axi.o_MAP(self.i_NARROW_SOC())
 
         # Bootrom
-        self.bind(soc_ico, 'bootrom', rom, 'input')
+        self.bind(narrow_axi, 'bootrom', rom, 'input')
+
+        # Dummy memory
+        self.bind(narrow_axi, 'dummy', dummy_mem, 'input')
 
         # L2
         for i in range(0, nb_axi_masters):
             self.bind(axi_ico[i], 'l2', l2_mem, 'input_%d' % i)
 
-        # CSR
-        self.bind(periph_ico, 'csr', cluster_regs, 'input')
+        # CSR Mempool regs (0x40000000) 
+        self.bind(narrow_axi, 'csr_mempool_regs', cluster_regs, 'input')
+
+        # Barrier config registers (0x20000000) mapping
+        self.bind(narrow_axi, 'csr_barrier_regs', cluster_regs, 'barrier_reg_input')
 
         # DMA Ctrl
-        self.bind(periph_ico, 'dma_ctrl', dma, 'input')
+        self.bind(narrow_axi, 'dma_ctrl', dma, 'input')
 
         # Binary loader
-        loader.o_OUT(loader_router.i_INPUT())
+        loader.o_OUT(instr_router.i_INPUT())
         self.bind(loader, 'entry', mempool_cluster, 'loader_entry')
         loader.o_START(cluster_regs.i_INST_PREHEAT_DONE())
         self.bind(cluster_regs, 'fetch_start', mempool_cluster, 'loader_start')   
         self.o_HBM_PRELOAD_DONE(cluster_regs.i_HBM_PRELOAD_DONE())
 
         #loader router
-        loader_router.add_mapping('dummy', base=arch.base, remove_offset=arch.base, size=arch.tcdm_size)
-        loader_router.add_mapping('mem', base=arch.insn_area.base, remove_offset=arch.insn_area.base, size=arch.insn_area.size)
-        loader_router.add_mapping('rom', base=0xa0000000, remove_offset=0xa0000000, size=0x1000)
-        loader_router.add_mapping('csr', base=0x40000000, remove_offset=0x40000000, size=0x10000)
-        self.bind(loader_router, 'mem', l2_mem, 'input_loader')
-        self.bind(loader_router, 'rom', rom, 'input')
-        self.bind(loader_router, 'csr', cluster_regs, 'input')
-        self.bind(loader_router, 'dummy', dummy_mem, 'input')
+        instr_router.o_MAP(narrow_axi.i_INPUT())
+        instr_router.add_mapping('mem', base=arch.insn_area.base, remove_offset=arch.insn_area.base, size=arch.insn_area.size)
+        self.bind(instr_router, 'mem', l2_mem, 'input_loader')
 
         #L2 ro-cache configuration
         self.bind(cluster_regs, 'rocache_cfg', mempool_cluster, 'rocache_cfg')
@@ -268,10 +259,10 @@ class ClusterUnit(gvsoc.systree.Component):
         # Sync memory for barrier counters (atomics-capable)
         sync_mem = memory.Memory(self, 'sync_mem', size=arch.sync_interleave, atomics=True, width_log2=2)
 
-        # Outgoing: soc_ico 'sync' -> sync_router_master -> SYNC_OUTPUT -> sync_bus
+        # Outgoing: narrow_axi 'sync' -> sync_router_master -> SYNC_OUTPUT -> sync_bus
         sync_router_master = router.Router(self, 'sync_router_master', bandwidth=4)
         sync_router_master.o_MAP(self.i_SYNC_OUTPUT())
-        soc_ico.o_MAP(sync_router_master.i_INPUT(), base=arch.sync_area.base, size=arch.sync_area.size*arch.num_cluster_x*arch.num_cluster_y, rm_base=False)
+        narrow_axi.o_MAP(sync_router_master.i_INPUT(), base=arch.sync_area.base, size=arch.sync_area.size*arch.num_cluster_x*arch.num_cluster_y, rm_base=False)
 
         # cluster_regs global_barrier_master -> sync_router_master (outgoing wakeup)
         cluster_regs.o_GLOBAL_BARRIER_MASTER(sync_router_master.i_INPUT())
@@ -284,9 +275,6 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # sync_router_slave -> cluster_regs global_barrier_slave (incoming wakeup)
         sync_router_slave.o_MAP(cluster_regs.i_GLOBAL_BARRIER_SLAVE(), base=arch.sync_interleave, size=arch.sync_special_mem, rm_base=True)
-
-        # Barrier config registers (0x20000000) mapping
-        self.bind(soc_ico, 'barrier_regs', cluster_regs, 'barrier_reg_input')
 
     def i_WIDE_INPUT(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'wide_input', signature='io')
