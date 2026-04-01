@@ -27,6 +27,7 @@
 
 
 #define MAX_CLUSTERS 16
+#define CLUSTER_LOCAL_EOC_NOTIFY_OFFSET 24
 
 class ClusterRegisters : public vp::Component
 {
@@ -47,7 +48,7 @@ private:
 
     vp::Trace trace;
 
-    // Existing ports (0x40000000 periph)
+    // Mempool barrier ports (0x40000000)
     vp::IoSlave input_itf;
     vp::WireMaster<bool> barrier_ack_itf;
     vp::WireMaster<IssOffloadInsn<uint32_t>*> rocache_cfg_itf;
@@ -55,10 +56,13 @@ private:
     vp::WireSlave<bool> inst_preheat_done_itf;
     vp::WireMaster<bool> fetch_start_itf;
 
-    // Inter-cluster barrier ports (0x20000000)
+    // Inter-cluster barrier ports (ARCH_CLUSTER_REG_BASE)
     vp::IoSlave barrier_reg_input_itf;
     vp::IoMaster global_barrier_master_itf;
     vp::IoSlave global_barrier_slave_itf;
+
+    // EOC notification port
+    vp::IoMaster cluster_eoc_itf;
 
     vp::ClockEvent * wakeup_event;
     int wakeup_latency;
@@ -74,10 +78,15 @@ private:
     uint32_t sync_base;
     uint32_t sync_interleave;
     uint32_t sync_special_mem;
+    uint32_t soc_register_base;
 
     // Pre-allocated IoReqs for wakeup messages via sync bus
     vp::IoReq wakeup_reqs[MAX_CLUSTERS];
     uint32_t wakeup_data;
+
+    // Pre-allocated IoReq for cluster-local EOC notification to top-level ctrl_registers.
+    vp::IoReq eoc_notify_req;
+    uint32_t eoc_notify_data;
 };
 
 
@@ -109,6 +118,9 @@ ClusterRegisters::ClusterRegisters(vp::ComponentConf &config)
     this->global_barrier_master_itf.set_resp_meth(&ClusterRegisters::global_barrier_master_resp);
     this->new_master_port("global_barrier_master", &this->global_barrier_master_itf);
 
+    this->cluster_eoc_itf.set_resp_meth(&ClusterRegisters::global_barrier_master_resp);
+    this->new_master_port("cluster_eoc", &this->cluster_eoc_itf);
+
     this->global_barrier_slave_itf.set_req_meth(&ClusterRegisters::global_barrier_slave_req);
     this->new_slave_port("global_barrier_slave", &this->global_barrier_slave_itf);
 
@@ -123,6 +135,7 @@ ClusterRegisters::ClusterRegisters(vp::ComponentConf &config)
     this->sync_base = get_js_config()->get_child_int("sync_base");
     this->sync_interleave = get_js_config()->get_child_int("sync_interleave");
     this->sync_special_mem = get_js_config()->get_child_int("sync_special_mem");
+    this->soc_register_base = get_js_config()->get_child_int("soc_register_base");
     this->wakeup_data = 1;
 }
 
@@ -180,7 +193,17 @@ vp::IoReqStatus ClusterRegisters::req(vp::Block *__this, vp::IoReq *req)
         {
             _this->eoc_reached = true;
             std::cout << "EOC register return value: 0x" << std::hex << ((value - 1) >> 1) << std::endl;
-            _this->time.get_engine()->quit(value >> 1);
+
+            // Encode cluster_id in upper 16 bits and keep original mempool payload in lower 16 bits.
+            _this->eoc_notify_data = (value & 0xFFFF) | ((_this->cluster_id & 0xFFFF) << 16);
+            _this->eoc_notify_req.init();
+            _this->eoc_notify_req.set_addr(_this->soc_register_base + CLUSTER_LOCAL_EOC_NOTIFY_OFFSET);
+            _this->eoc_notify_req.set_size(4);
+            _this->eoc_notify_req.set_is_write(true);
+            _this->eoc_notify_req.set_data((uint8_t *)&_this->eoc_notify_data);
+
+            // Send cluster-local EOC notification through dedicated MMIO path.
+            _this->cluster_eoc_itf.req(&_this->eoc_notify_req);
         }
         if (offset == 4 && value == 0xFFFFFFFF)
         {

@@ -130,7 +130,8 @@ class FlexClusterSystem(gvsoc.systree.Component):
                                         nb_l2_banks             =   arch.nb_l2_banks,
                                         sync_base               =   arch.sync_base,
                                         sync_interleave         =   arch.sync_interleave,
-                                        sync_special_mem        =   arch.sync_special_mem)
+                                        sync_special_mem        =   arch.sync_special_mem,
+                                        soc_register_base       =   arch.soc_register_base)
 
             cluster_list.append(ClusterUnit(self,f'cluster_{cluster_id}', cluster_arch, binary, parser))
             pass

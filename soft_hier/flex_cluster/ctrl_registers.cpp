@@ -25,7 +25,10 @@
 #include <vp/itf/wire.hpp>
 #include <unordered_map>
 #include <set>
+#include <vector>
 
+
+#define CLUSTER_LOCAL_EOC_NOTIFY_OFFSET 0x18
 
 class CtrlRegisters : public vp::Component
 {
@@ -39,7 +42,6 @@ private:
     static void debug_stop_event_handler(vp::Block *__this, vp::ClockEvent *event);
     static void hbm_preload_done_handler(vp::Block *__this, bool value);
     static void hbm_preload_done_to_cluster_handler(vp::Block *__this, vp::ClockEvent *event);
-    static void wakeup_event_handler(vp::Block *__this, vp::ClockEvent *event);
     void reset(bool active);
 
     vp::Trace trace;
@@ -57,6 +59,9 @@ private:
     uint32_t num_cluster_all;
     uint32_t has_preload_binary;
     uint32_t hbm_preload_done;
+    uint32_t cluster_eoc_count;
+    std::vector<uint8_t> cluster_eoc_seen;
+    std::vector<uint32_t> cluster_eoc_values;
 };
 
 CtrlRegisters::CtrlRegisters(vp::ComponentConf &config)
@@ -73,7 +78,12 @@ CtrlRegisters::CtrlRegisters(vp::ComponentConf &config)
 
     this->new_slave_port("input", &this->input_itf);
     this->new_master_port("barrier_ack", &this->barrier_ack_itf);
+
     this->hbm_preload_done_to_cluster_itf_array = new vp::WireMaster<bool>[this->num_cluster_all];
+    this->cluster_eoc_seen.assign(this->num_cluster_all, 0);
+    this->cluster_eoc_values.assign(this->num_cluster_all, 0);
+    this->cluster_eoc_count = 0;
+
     for (int i = 0; i < this->num_cluster_all; ++i)
     {
         this->new_master_port("hbm_preload_done_to_cluster_"  + std::to_string(i), &(this->hbm_preload_done_to_cluster_itf_array[i]));
@@ -83,7 +93,7 @@ CtrlRegisters::CtrlRegisters(vp::ComponentConf &config)
     this->hbm_preload_done_to_cluster_event = this->event_new(&CtrlRegisters::hbm_preload_done_to_cluster_handler);
     this->timer_start = 0;
     this->hbm_preload_done = (this->has_preload_binary == 0)? 1:0;
-    this->wakeup_event = this->event_new(&CtrlRegisters::wakeup_event_handler);
+    this->wakeup_event = NULL;
     wakeup_latency = get_js_config()->get_child_int("wakeup_latency");
 }
 
@@ -91,6 +101,9 @@ void CtrlRegisters::reset(bool active)
 {
     if (active)
     {
+        this->cluster_eoc_count = 0;
+        this->cluster_eoc_seen.assign(this->num_cluster_all, 0);
+        this->cluster_eoc_values.assign(this->num_cluster_all, 0);
         std::cout << "[SystemInfo]: num_cluster_x = " << this->num_cluster_x << ", num_cluster_y = " << this->num_cluster_y << std::endl;
         this->event_enqueue(this->hbm_preload_done_to_cluster_event, 300);
     }
@@ -123,12 +136,6 @@ void CtrlRegisters::hbm_preload_done_handler(vp::Block *__this, bool value)
     _this->trace.msg(vp::Trace::LEVEL_DEBUG, "HBM Preloading Done\n");
 }
 
-void CtrlRegisters::wakeup_event_handler(vp::Block *__this, vp::ClockEvent *event) {
-    CtrlRegisters *_this = (CtrlRegisters *)__this;
-    _this->barrier_ack_itf.sync(1);
-    _this->trace.msg("Control registers wake up signal work and write %d to barrier ack output\n", 1);
-}
-
 
 vp::IoReqStatus CtrlRegisters::req(vp::Block *__this, vp::IoReq *req)
 {
@@ -151,7 +158,10 @@ vp::IoReqStatus CtrlRegisters::req(vp::Block *__this, vp::IoReq *req)
         }
         if (offset == 4 && value == 0xFFFFFFFF)
         {
-            _this->event_enqueue(_this->wakeup_event, _this->wakeup_latency);
+            if (_this->wakeup_event != NULL)
+            {
+                _this->event_enqueue(_this->wakeup_event, _this->wakeup_latency);
+            }
         }
         if (offset == 8)
         {
@@ -171,6 +181,37 @@ vp::IoReqStatus CtrlRegisters::req(vp::Block *__this, vp::IoReq *req)
         if (offset == 20)
         {
             std::cout << value;
+        }
+        if (offset == CLUSTER_LOCAL_EOC_NOTIFY_OFFSET)
+        {
+            uint32_t cluster_id = (value >> 16) & 0xFFFF;
+            uint32_t eoc_value = value & 0xFFFF;
+
+            if (cluster_id >= _this->num_cluster_all)
+            {
+                _this->trace.msg("Ignoring invalid cluster-local EOC notification (cluster_id: %d, value: 0x%x)\n",
+                    cluster_id, value);
+            }
+            else if (_this->cluster_eoc_seen[cluster_id])
+            {
+                _this->trace.msg("Ignoring repeated mempool EOC for cluster %d (value: 0x%x)\n",
+                    cluster_id, eoc_value);
+            }
+            else
+            {
+                _this->cluster_eoc_seen[cluster_id] = 1;
+                _this->cluster_eoc_values[cluster_id] = eoc_value;
+                _this->cluster_eoc_count++;
+
+                _this->trace.msg("Cluster %d mempool EOC received via MMIO (value: 0x%x, hartid: %d)\n",
+                    cluster_id, eoc_value, eoc_value >> 1);
+
+                if (_this->cluster_eoc_count == _this->num_cluster_all)
+                {
+                    _this->trace.msg("All clusters reached mempool EOC, terminating simulation with code 0\n");
+                    _this->time.get_engine()->quit(0);
+                }
+            }
         }
         if (offset == 40) {
             //Stop at Time

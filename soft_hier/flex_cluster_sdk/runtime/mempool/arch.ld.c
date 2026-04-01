@@ -8,6 +8,7 @@
 MEMORY {
   l1 (R) : ORIGIN = 0x00000000, LENGTH = (NUM_CORES * BANKING_FACTOR * L1_BANK_SIZE)
   l2     : ORIGIN = L2_BASE   , LENGTH = L2_SIZE
+  rom (R) : ORIGIN = BOOT_ADDR , LENGTH = 0x00001000
   hbm    : ORIGIN = 0xc0000000, LENGTH = 0x20000000
 }
 
@@ -17,6 +18,8 @@ SECTIONS {
   __l1_end = ORIGIN(l1) + LENGTH(l1);
   __l2_start = ORIGIN(l2);
   __l2_end = ORIGIN(l2) + LENGTH(l2);
+  __rom_start = ORIGIN(rom);
+  __rom_end = ORIGIN(rom) + LENGTH(rom);
 
   // Stack region in sequential L1 memory
   __stack_start = __l1_start;

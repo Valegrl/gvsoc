@@ -20,7 +20,8 @@ class ClusterRegisters(gvsoc.systree.Component):
 
     def __init__(self, parent: gvsoc.systree.Component, name: str, wakeup_latency: int=0,
                  cluster_id: int=0, num_cluster_x: int=1, num_cluster_y: int=1,
-                 sync_base: int=0x50000000, sync_interleave: int=0x80, sync_special_mem: int=0x40):
+                 sync_base: int=0x50000000, sync_interleave: int=0x80, sync_special_mem: int=0x40,
+                 soc_register_base: int=0x90000000):
 
         super().__init__(parent, name)
 
@@ -34,6 +35,7 @@ class ClusterRegisters(gvsoc.systree.Component):
             'sync_base': sync_base,
             'sync_interleave': sync_interleave,
             'sync_special_mem': sync_special_mem,
+            'soc_register_base': soc_register_base,
         })
 
     def i_INPUT(self) -> gvsoc.systree.SlaveItf:
@@ -53,6 +55,9 @@ class ClusterRegisters(gvsoc.systree.Component):
     
     def o_GLOBAL_BARRIER_MASTER(self, itf: gvsoc.systree.SlaveItf):
         self.itf_bind('global_barrier_master', itf, signature='io')
+
+    def o_CLUSTER_EOC(self, itf: gvsoc.systree.SlaveItf):
+        self.itf_bind('cluster_eoc', itf, signature='io')
 
     def i_HBM_PRELOAD_DONE(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'hbm_preload_done', signature='wire<bool>')

@@ -83,6 +83,7 @@ class ClusterArch:
                         sync_base,
                         sync_interleave,
                         sync_special_mem,
+                        soc_register_base,
                         auto_fetch=False):
 
         self.base                   = base
@@ -113,6 +114,7 @@ class ClusterArch:
         self.sync_interleave        = sync_interleave
         self.sync_special_mem       = sync_special_mem
         self.sync_area              = Area(sync_base, sync_interleave + sync_special_mem)
+        self.soc_register_base      = soc_register_base
 
 class ClusterUnit(gvsoc.systree.Component):
 
@@ -145,7 +147,8 @@ class ClusterUnit(gvsoc.systree.Component):
             num_cluster_y=arch.num_cluster_y,
             sync_base=arch.sync_base,
             sync_interleave=arch.sync_interleave,
-            sync_special_mem=arch.sync_special_mem)
+            sync_special_mem=arch.sync_special_mem,
+            soc_register_base=arch.soc_register_base)
 
         # DMA
         dma = MemPoolDma(self, 'dma', loc_base=arch.base, loc_size=arch.tcdm_size, tcdm_width=arch.total_cores*arch.bank_factor*4)
@@ -230,6 +233,10 @@ class ClusterUnit(gvsoc.systree.Component):
 
         #L2 ro-cache configuration
         self.bind(cluster_regs, 'rocache_cfg', mempool_cluster, 'rocache_cfg')
+
+        # Mempool EOC MMIO notification path:
+        # cluster_regs -> narrow_axi -> narrow_soc -> virtual_interco.
+        self.bind(cluster_regs, 'cluster_eoc', narrow_axi, 'input')
 
         #DMA data
         #To emulate distributed backends in groups
