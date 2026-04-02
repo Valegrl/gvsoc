@@ -213,11 +213,9 @@ uint32_t flex_amo_fetch_add(uint32_t* barrier){
 
 void flex_intra_cluster_sync(){
 #ifdef MEMPOOL_CLUSTER_UNIT
-    // Mempool-based cluster: use mempool_barrier for intra-cluster sync
-    uint32_t core_id = mempool_get_core_id();
+    // Mempool-based cluster: use plain barrier for repeated intra-cluster sync.
+    // [mempool_barrier_init() | flex_barrier_init() | flex_barrier_xy_init()] must be done once before first use.
     uint32_t num_cores = mempool_get_core_count();
-    // Initialize synchronization variables
-    mempool_barrier_init(core_id);
     mempool_barrier(num_cores);
 #else
     // Snitch-based cluster: use hardware barrier CSR
@@ -266,6 +264,11 @@ void flex_barrier_init(){
 }
 
 void flex_global_barrier(){
+#ifdef MEMPOOL_CLUSTER_UNIT
+    // Initialize mempool barrier state once before using repeated intra-cluster barriers.
+    uint32_t core_id = mempool_get_core_id();
+    mempool_barrier_init(core_id);
+#endif
     volatile uint32_t * barrier      = (volatile uint32_t *) ARCH_SYNC_BASE;
 
     flex_intra_cluster_sync();
@@ -322,6 +325,11 @@ void flex_global_barrier_polling(){
 }
 
 void flex_barrier_xy_init(){
+#ifdef MEMPOOL_CLUSTER_UNIT
+    // Initialize mempool barrier state once before using repeated intra-cluster barriers.
+    uint32_t core_id = mempool_get_core_id();
+    mempool_barrier_init(core_id);
+#endif
     FlexPosition        pos          = get_pos(flex_get_cluster_id());
     uint32_t            pos_x_middel = (ARCH_NUM_CLUSTER_X)/2;
     uint32_t            pos_y_middel = (ARCH_NUM_CLUSTER_Y)/2;
