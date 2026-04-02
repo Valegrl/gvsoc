@@ -238,6 +238,11 @@ inline void flex_wakeup_all_clusters()
 }
 
 void flex_barrier_init(){
+#ifdef MEMPOOL_CLUSTER_UNIT
+    // Initialize mempool barrier state once before using repeated intra-cluster barriers.
+    uint32_t core_id = mempool_get_core_id();
+    mempool_barrier_init(core_id);
+#endif
     volatile uint32_t * barrier      = (volatile uint32_t *) ARCH_SYNC_BASE;
 
     if (flex_is_dm_core()){
@@ -264,11 +269,6 @@ void flex_barrier_init(){
 }
 
 void flex_global_barrier(){
-#ifdef MEMPOOL_CLUSTER_UNIT
-    // Initialize mempool barrier state once before using repeated intra-cluster barriers.
-    uint32_t core_id = mempool_get_core_id();
-    mempool_barrier_init(core_id);
-#endif
     volatile uint32_t * barrier      = (volatile uint32_t *) ARCH_SYNC_BASE;
 
     flex_intra_cluster_sync();
