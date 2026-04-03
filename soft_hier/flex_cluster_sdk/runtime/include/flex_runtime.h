@@ -244,25 +244,16 @@ void flex_barrier_init(){
     mempool_barrier_init(core_id);
 #endif
     volatile uint32_t * barrier      = (volatile uint32_t *) ARCH_SYNC_BASE;
+    volatile uint32_t * cluster_reg  = (volatile uint32_t *) ARCH_CLUSTER_REG_BASE;
 
     if (flex_is_dm_core()){
         if (flex_get_cluster_id() == 0)
         {
+            // __atomic_store_n(barrier, 0, __ATOMIC_RELAXED);
             flex_reset_barrier(barrier);
-#ifdef MEMPOOL_CLUSTER_UNIT
-            // Mempool path: also reset the polling iteration counter
-            volatile uint32_t * barrier_iter = (volatile uint32_t *) (ARCH_SYNC_BASE + 4);
-            flex_reset_barrier(barrier_iter);
-#else
-            // Snitch path: wakeup all clusters via sync bus to release HW barrier
             flex_wakeup_all_clusters();
-#endif
         }
-#ifndef MEMPOOL_CLUSTER_UNIT
-        // Snitch path: write to cluster_reg triggers barrier_ack for HW CSR barrier
-        volatile uint32_t * cluster_reg  = (volatile uint32_t *) ARCH_CLUSTER_REG_BASE;
         *cluster_reg = flex_get_enable_value();
-#endif
     }
 
     flex_intra_cluster_sync();
@@ -270,31 +261,17 @@ void flex_barrier_init(){
 
 void flex_global_barrier(){
     volatile uint32_t * barrier      = (volatile uint32_t *) ARCH_SYNC_BASE;
+    volatile uint32_t * cluster_reg  = (volatile uint32_t *) ARCH_CLUSTER_REG_BASE;
 
     flex_intra_cluster_sync();
 
     if (flex_is_dm_core()){
         flex_annotate_barrier(0);
-#ifdef MEMPOOL_CLUSTER_UNIT
-        // Mempool path: use polling to wait for all clusters (no wakeup needed)
-        volatile uint32_t * barrier_iter = (volatile uint32_t *) (ARCH_SYNC_BASE + 4);
-        uint32_t prev_barrier_iteration = *barrier_iter;
-
-        if ((flex_get_barrier_num_cluster() - flex_get_enable_value()) == flex_amo_fetch_add(barrier)) {
-            flex_reset_barrier(barrier);
-            flex_amo_fetch_add(barrier_iter);
-        } else {
-            while((*barrier_iter) == prev_barrier_iteration);
-        }
-#else
-        // Snitch path: use wakeup mechanism
         if ((flex_get_barrier_num_cluster() - flex_get_enable_value()) == flex_amo_fetch_add(barrier)) {
             flex_reset_barrier(barrier);
             flex_wakeup_all_clusters();
         }
-        volatile uint32_t * cluster_reg  = (volatile uint32_t *) ARCH_CLUSTER_REG_BASE;
         *cluster_reg = flex_get_enable_value();
-#endif
         flex_annotate_barrier(0);
     }
 
@@ -334,6 +311,7 @@ void flex_barrier_xy_init(){
     uint32_t            pos_x_middel = (ARCH_NUM_CLUSTER_X)/2;
     uint32_t            pos_y_middel = (ARCH_NUM_CLUSTER_Y)/2;
     volatile uint32_t * barrier_y    = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos_y_middel)*ARCH_SYNC_SIZE)+16);
+    volatile uint32_t * cluster_reg  = (volatile uint32_t *) ARCH_CLUSTER_REG_BASE;
 
     if (flex_is_dm_core()){
         if (flex_get_cluster_id() == 0)
@@ -344,23 +322,9 @@ void flex_barrier_xy_init(){
                 volatile uint32_t * barrier_x = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,i)*ARCH_SYNC_SIZE)+8);
                 flex_reset_barrier(barrier_x);
             }
-#ifdef MEMPOOL_CLUSTER_UNIT
-            // Mempool path: also reset xy polling iteration counters
-            for (int i = 0; i < ARCH_NUM_CLUSTER_Y; ++i)
-            {
-                volatile uint32_t * barrier_ix = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,i)*ARCH_SYNC_SIZE)+12);
-                flex_reset_barrier(barrier_ix);
-            }
-            volatile uint32_t * barrier_iy = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos_y_middel)*ARCH_SYNC_SIZE)+20);
-            flex_reset_barrier(barrier_iy);
-#else
             flex_wakeup_all_clusters();
-#endif
         }
-#ifndef MEMPOOL_CLUSTER_UNIT
-        volatile uint32_t * cluster_reg  = (volatile uint32_t *) ARCH_CLUSTER_REG_BASE;
         *cluster_reg = flex_get_enable_value();
-#endif
     }
 
     flex_intra_cluster_sync();
@@ -378,32 +342,13 @@ void flex_global_barrier_xy(){
         uint32_t            pos_y_middel = (flex_get_barrier_num_cluster_y())/2;
         volatile uint32_t * barrier_x    = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos.y       )*ARCH_SYNC_SIZE)+8);
         volatile uint32_t * barrier_y    = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos_y_middel)*ARCH_SYNC_SIZE)+16);
-
-#ifdef MEMPOOL_CLUSTER_UNIT
-        // Mempool path: use polling
-        volatile uint32_t * barrier_ix   = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos.y       )*ARCH_SYNC_SIZE)+12);
-        volatile uint32_t * barrier_iy   = (volatile uint32_t *) (ARCH_SYNC_BASE+(cluster_index(pos_x_middel,pos_y_middel)*ARCH_SYNC_SIZE)+20);
-        uint32_t prev_barrier_iter_x     = *barrier_ix;
-        uint32_t prev_barrier_iter_y     = *barrier_iy;
-
-        if ((flex_get_barrier_num_cluster_x() - flex_get_enable_value()) == flex_amo_fetch_add(barrier_x)) {
-            flex_reset_barrier(barrier_x);
-            if ((flex_get_barrier_num_cluster_y() - flex_get_enable_value()) == flex_amo_fetch_add(barrier_y))
-            {
-                flex_reset_barrier(barrier_y);
-                flex_amo_fetch_add(barrier_iy);
-            } else {
-                while((*barrier_iy) == prev_barrier_iter_y);
-            }
-            flex_amo_fetch_add(barrier_ix);
-        } else {
-            while((*barrier_ix) == prev_barrier_iter_x);
-        }
-#else
-        // Snitch path: use wakeup mechanism
         volatile uint32_t * cluster_reg  = (volatile uint32_t *) ARCH_CLUSTER_REG_BASE;
+
+        //First Barrier X
         if ((flex_get_barrier_num_cluster_x() - flex_get_enable_value()) == flex_amo_fetch_add(barrier_x)) {
             flex_reset_barrier(barrier_x);
+
+            //For cluster synced X, then sync Y
             if ((flex_get_barrier_num_cluster_y() - flex_get_enable_value()) == flex_amo_fetch_add(barrier_y))
             {
                 flex_reset_barrier(barrier_y);
@@ -411,7 +356,6 @@ void flex_global_barrier_xy(){
             }
         }
         *cluster_reg = flex_get_enable_value();
-#endif
 
         flex_annotate_barrier(0);
     }

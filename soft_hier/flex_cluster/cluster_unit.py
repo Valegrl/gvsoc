@@ -66,6 +66,8 @@ class ClusterArch:
                         base,
                         tcdm_size,
                         cluster_id,
+                        stack_base,         
+                        stack_size,
                         reg_base,
                         reg_size,
                         num_cluster_x,
@@ -81,7 +83,7 @@ class ClusterArch:
                         nb_axi_masters_per_group,
                         nb_l2_banks,
                         sync_base,
-                        sync_interleave,
+                        sync_itlv,
                         sync_special_mem,
                         soc_register_base,
                         auto_fetch=False):
@@ -90,6 +92,7 @@ class ClusterArch:
         self.tcdm_size              = tcdm_size
         self.cluster_id             = cluster_id
         self.auto_fetch             = auto_fetch
+        self.stack_area             = Area(stack_base, stack_size)
         self.reg_area               = Area(reg_base, reg_size)
         self.insn_area              = Area(insn_base, insn_size)
 
@@ -111,9 +114,9 @@ class ClusterArch:
 
         # Sync bus parameters
         self.sync_base              = sync_base
-        self.sync_interleave        = sync_interleave
+        self.sync_itlv              = sync_itlv
         self.sync_special_mem       = sync_special_mem
-        self.sync_area              = Area(sync_base, sync_interleave + sync_special_mem)
+        self.sync_area              = Area(sync_base, sync_itlv + sync_special_mem)
         self.soc_register_base      = soc_register_base
 
 class ClusterUnit(gvsoc.systree.Component):
@@ -139,15 +142,16 @@ class ClusterUnit(gvsoc.systree.Component):
         # Boot Rom
         rom = memory.Memory(self, 'rom', size=0x1000, width_log2=(arch.axi_data_width - 1).bit_length(), stim_file=self.get_file_path('pulp/chips/spatz/rom.bin'))
 
+        #stack memory
+        stack_mem = memory.Memory(self, 'stack_mem', size=arch.stack_area.size)
+
         # Cluster CSRs (extended with inter-cluster barrier config)
         cluster_regs = ClusterRegisters(self, 'ctrl_registers',
             wakeup_latency=18 if arch.terapool else 15,
             cluster_id=arch.cluster_id,
             num_cluster_x=arch.num_cluster_x,
             num_cluster_y=arch.num_cluster_y,
-            sync_base=arch.sync_base,
-            sync_interleave=arch.sync_interleave,
-            sync_special_mem=arch.sync_special_mem,
+            global_barrier_addr=arch.sync_area.base+arch.sync_itlv,
             soc_register_base=arch.soc_register_base)
 
         # DMA
@@ -205,6 +209,9 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # Dummy memory
         self.bind(narrow_axi, 'dummy', dummy_mem, 'input')
+
+        #binding to stack memory
+        narrow_axi.o_MAP(stack_mem.i_INPUT(), base=arch.stack_area.base, size=arch.stack_area.size, rm_base=True)
 
         # L2
         for i in range(0, nb_axi_masters):
@@ -264,7 +271,7 @@ class ClusterUnit(gvsoc.systree.Component):
             self.bind(cluster_regs, f'barrier_ack', mempool_cluster, f'barrier_ack_{i}')
 
         # Sync memory for barrier counters (atomics-capable)
-        sync_mem = memory.Memory(self, 'sync_mem', size=arch.sync_interleave, atomics=True, width_log2=2)
+        sync_mem = memory.Memory(self, 'sync_mem', size=arch.sync_itlv, atomics=True, width_log2=2)
 
         # Outgoing: narrow_axi 'sync' -> sync_router_master -> SYNC_OUTPUT -> sync_bus
         sync_router_master = router.Router(self, 'sync_router_master', bandwidth=4)
@@ -281,7 +288,7 @@ class ClusterUnit(gvsoc.systree.Component):
         self.bind(sync_router_slave, f'sync_mem', sync_mem, f'input')
 
         # sync_router_slave -> cluster_regs global_barrier_slave (incoming wakeup)
-        sync_router_slave.o_MAP(cluster_regs.i_GLOBAL_BARRIER_SLAVE(), base=arch.sync_interleave, size=arch.sync_special_mem, rm_base=True)
+        sync_router_slave.o_MAP(cluster_regs.i_GLOBAL_BARRIER_SLAVE(), base=arch.sync_itlv, size=arch.sync_special_mem, rm_base=True)
 
     def i_WIDE_INPUT(self) -> gvsoc.systree.SlaveItf:
         return gvsoc.systree.SlaveItf(self, 'wide_input', signature='io')

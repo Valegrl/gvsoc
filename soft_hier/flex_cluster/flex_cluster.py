@@ -114,6 +114,8 @@ class FlexClusterSystem(gvsoc.systree.Component):
                                         base                    =   arch.cluster_tcdm_base,
                                         tcdm_size               =   arch.cluster_tcdm_size,
                                         cluster_id              =   cluster_id,
+                                        stack_base              =   arch.cluster_stack_base,
+                                        stack_size              =   arch.cluster_stack_size,
                                         reg_base                =   arch.cluster_reg_base,
                                         reg_size                =   arch.cluster_reg_size,
                                         num_cluster_x           =   arch.num_cluster_x,
@@ -129,7 +131,7 @@ class FlexClusterSystem(gvsoc.systree.Component):
                                         nb_axi_masters_per_group=   arch.nb_axi_masters_per_group,
                                         nb_l2_banks             =   arch.nb_l2_banks,
                                         sync_base               =   arch.sync_base,
-                                        sync_interleave         =   arch.sync_interleave,
+                                        sync_itlv               =   arch.sync_interleave,
                                         sync_special_mem        =   arch.sync_special_mem,
                                         soc_register_base       =   arch.soc_register_base)
 
