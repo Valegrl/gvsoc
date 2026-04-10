@@ -24,6 +24,7 @@ from elftools.elf.elffile import *
 from pulp.mempool.mempool_cluster import Cluster
 from pulp.mempool.l2_subsystem import L2_subsystem
 from pulp.chips.flex_cluster.cluster_registers import ClusterRegisters
+from pulp.chips.flex_cluster.util_dumpper import UtilDumpper
 
 import gvsoc.runner
 import math
@@ -154,8 +155,15 @@ class ClusterUnit(gvsoc.systree.Component):
             global_barrier_addr=arch.sync_area.base+arch.sync_itlv,
             soc_register_base=arch.soc_register_base)
 
+        # Data Dumpper
+        data_dumpper = UtilDumpper(self, 'data_dumpper', arch.cluster_id)
+        data_dumpper_ctrl_base = arch.reg_area.base + arch.reg_area.size
+        data_dumpper_ctrl_size = 64
+        data_dumpper_input_base = arch.base + arch.tcdm_size
+        data_dumpper_input_size = arch.tcdm_size
+
         # DMA
-        dma = MemPoolDma(self, 'dma', loc_base=arch.base, loc_size=arch.tcdm_size, tcdm_width=arch.total_cores*arch.bank_factor*4)
+        dma = MemPoolDma(self, 'dma', loc_base=arch.base, loc_size=arch.tcdm_size + data_dumpper_input_size, tcdm_width=arch.total_cores*arch.bank_factor*4)
 
         # Binary Loader
         loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary, entry=arch.insn_area.base)
@@ -183,6 +191,7 @@ class ClusterUnit(gvsoc.systree.Component):
         narrow_axi.add_mapping('csr_mempool_regs', base=0x40000000, remove_offset=0x40000000, size=0x10000, latency=1)
         narrow_axi.add_mapping('dma_ctrl', base=0x40010000, remove_offset=0x40010000, size=0x10000, latency=1)
         narrow_axi.add_mapping('csr_barrier_regs', base=arch.reg_area.base, remove_offset=arch.reg_area.base, size=arch.reg_area.size, latency=1)
+        narrow_axi.add_mapping('data_dumpper_ctrl', base=data_dumpper_ctrl_base, remove_offset=data_dumpper_ctrl_base, size=data_dumpper_ctrl_size, latency=1)
 
         # Binary Loader Router
         instr_router = router.Router(self, 'instr_router', bandwidth=8*arch.total_cores)
@@ -226,6 +235,9 @@ class ClusterUnit(gvsoc.systree.Component):
         # DMA Ctrl
         self.bind(narrow_axi, 'dma_ctrl', dma, 'input')
 
+        # Data Dumpper Ctrl
+        self.bind(narrow_axi, 'data_dumpper_ctrl', data_dumpper, 'ctrl')
+
         # Binary loader
         loader.o_OUT(instr_router.i_INPUT())
         self.bind(loader, 'entry', mempool_cluster, 'loader_entry')
@@ -247,8 +259,13 @@ class ClusterUnit(gvsoc.systree.Component):
 
         #DMA data
         #To emulate distributed backends in groups
-        self.bind(dma, 'tcdm_read', mempool_cluster, 'dma_tcdm')
-        self.bind(dma, 'tcdm_write', mempool_cluster, 'dma_tcdm')
+        data_dumpper_arbiter = router.Router(self, 'data_dumpper_arbiter')
+        data_dumpper_arbiter.add_mapping('dma_tcdm')
+        data_dumpper_arbiter.add_mapping('data_dumpper_input', base=data_dumpper_input_base, remove_offset=data_dumpper_input_base, size=data_dumpper_input_size)
+        self.bind(data_dumpper_arbiter, 'dma_tcdm', mempool_cluster, 'dma_tcdm')
+        self.bind(data_dumpper_arbiter, 'data_dumpper_input', data_dumpper, 'input')
+        self.bind(dma, 'tcdm_read', data_dumpper_arbiter, 'input')
+        self.bind(dma, 'tcdm_write', data_dumpper_arbiter, 'input')
 
         # Wire router for incoming remote cluster TCDM accesses via data NoC
         wide_axi_goto_tcdm = router.Router(self, 'wide_axi_goto_tcdm')
