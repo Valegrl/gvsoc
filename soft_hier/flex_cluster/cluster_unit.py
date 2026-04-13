@@ -270,8 +270,8 @@ class ClusterUnit(gvsoc.systree.Component):
         # Wire router for incoming remote cluster TCDM accesses via data NoC
         wide_axi_goto_tcdm = router.Router(self, 'wide_axi_goto_tcdm')
         self.o_WIDE_INPUT(wide_axi_goto_tcdm.i_INPUT())
-        wide_axi_goto_tcdm.add_mapping('dma_axi')
-        self.bind(wide_axi_goto_tcdm, 'dma_axi', mempool_cluster, 'dma_axi')
+        wide_axi_goto_tcdm.add_mapping('dma_tcdm')
+        self.bind(wide_axi_goto_tcdm, 'dma_tcdm', mempool_cluster, 'dma_tcdm')
 
         # Wide SoC path for remote cluster TCDM and HBM accesses via data NoC
         wide_axi_from_idma = router.Router(self, 'wide_axi_from_idma')

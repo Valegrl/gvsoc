@@ -282,7 +282,19 @@ ifdef pld
 	preload_arg = --preload $(pld_path)
 endif
 run:
-	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) --trace=/chip/cluster_0/mempool_cluster/group_0/tile_0/pe0 | tee sw_build/run_trace.txt
+	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) \
+	--trace-level=debug \
+	--trace=/chip/cluster_0/dma \
+	--trace-level=trace \
+	--trace=/chip/cluster_0/dma \
+	--trace=/chip/data_noc/ni_1_1 \
+	--trace=/chip/data_noc/router_1_1 \
+	--trace=/chip/cluster_0/wide_axi_goto_tcdm \
+	--trace=/chip/cluster_0/mempool_cluster/dma_tcdm_itf \
+	--trace=/chip/cluster_0/mempool_cluster/dma_tcdm_interleaver \
+	--trace=/chip/cluster_0/mempool_cluster/dma_axi_interleaver \
+	--trace=/chip/cluster_0/mempool_cluster/group_3/tile_0/addr_scrambler3 \
+	| tee sw_build/run_trace.txt
 
 run_only:
 	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg)
