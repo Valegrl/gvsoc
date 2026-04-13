@@ -45,7 +45,7 @@ all: checkout build
 checkout:
 	git submodule update --recursive --init
 
-.PHONY: build tmp_hw config hw
+.PHONY: build mempool_hw config hw
 
 ifdef DEBUG
 BUILD_TYPE = RelWithDebInfo
@@ -202,7 +202,7 @@ hw:
 FLOONOC_COMMIT := 3ca2016d056dda72317e27c4319fc6174b5f8c4d
 FLOONOC_REPO   := https://github.com/gvsoc/gvsoc-pulp.git
 
-tmp_hw:
+mempool_hw:
 	$(MAKE) clean
 	$(MAKE) config
 	tmpdir=$$(mktemp -d) && \
