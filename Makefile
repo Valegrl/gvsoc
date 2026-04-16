@@ -107,9 +107,6 @@ update:
 
 dramsys_apply_patch:
 	git submodule update --init --recursive
-	if cd core && git apply --check ../soft_hier/gvsoc_core.patch; then \
-		git apply ../soft_hier/gvsoc_core.patch;\
-	fi
 	if cd pulp && git apply --check ../soft_hier/gvsoc_pulp.patch; then \
 		git apply ../soft_hier/gvsoc_pulp.patch;\
 	fi
@@ -199,23 +196,6 @@ hw:
 	make config
 	make TARGETS=pulp.chips.flex_cluster.flex_cluster all
 
-FLOONOC_COMMIT := 3ca2016d056dda72317e27c4319fc6174b5f8c4d
-FLOONOC_REPO   := https://github.com/gvsoc/gvsoc-pulp.git
-
-mempool_hw:
-	$(MAKE) clean
-	$(MAKE) config
-	tmpdir=$$(mktemp -d) && \
-	git clone $(FLOONOC_REPO) $$tmpdir/gvsoc-pulp && \
-	cd $$tmpdir/gvsoc-pulp && \
-	git checkout $(FLOONOC_COMMIT) && \
-	cp -rf pulp/floonoc/. $(CURDIR)/pulp/pulp/floonoc/ && \
-	rm -rf $$tmpdir
-	if cd pulp && git apply --check --include='pulp/floonoc/*' ../soft_hier/gvsoc_pulp.patch 2>/dev/null; then \
-		git apply --include='pulp/floonoc/*' ../soft_hier/gvsoc_pulp.patch; \
-	fi
-	$(MAKE) TARGETS=pulp.chips.flex_cluster.flex_cluster build
-
 # bowwang: Deeploy-related
 hw-deeploy:
 	config_file=examples/SoftHier/config/arch_deeploy.py make config
@@ -297,7 +277,7 @@ run:
 	| tee sw_build/run_trace.txt
 
 run_only:
-	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg)
+	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) | tee sw_build/run_trace.txt
 
 runv:
 	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) --trace=redmule --trace=idma --trace=spatz --trace=cluster_registers | tee sw_build/analyze_trace.txt
