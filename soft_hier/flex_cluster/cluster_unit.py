@@ -19,7 +19,7 @@ import gvsoc.systree
 
 import interco.router as router
 import memory.memory as memory
-from pulp.mempool.dma.mempool_dma import MemPoolDma
+from pulp.chips.flex_cluster.mempool_dma.flex_mempool_dma import FlexMemPoolDma
 from elftools.elf.elffile import *
 from pulp.mempool.mempool_cluster import Cluster
 from pulp.mempool.l2_subsystem import L2_subsystem
@@ -163,7 +163,7 @@ class ClusterUnit(gvsoc.systree.Component):
         data_dumpper_input_size = arch.tcdm_size
 
         # DMA
-        dma = MemPoolDma(self, 'dma', loc_base=arch.base, loc_size=arch.tcdm_size + data_dumpper_input_size, tcdm_width=arch.total_cores*arch.bank_factor*4)
+        dma = FlexMemPoolDma(self, 'dma', loc_base=arch.base, loc_size=arch.tcdm_size + data_dumpper_input_size, tcdm_width=arch.total_cores*arch.bank_factor*4)
 
         # Binary Loader
         loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary, entry=arch.insn_area.base)
