@@ -23,8 +23,8 @@
 #define COLS_LOAD  16               /* columns to load per row             */
 #define ELEM_BYTES sizeof(uint16_t)
 
-/* L1 destination: ROWS × COLS_LOAD fp16 elements, packed tightly */
-static uint16_t l1_buf[ROWS * COLS_LOAD] __attribute__((section(".l1"), aligned(64)));
+/* L1 destination: ROWS × COLS_LOAD fp16 matrix, packed tightly (row-major) */
+static uint16_t l1_buf[ROWS][COLS_LOAD] __attribute__((section(".l1"), aligned(64)));
 
 int main()
 {
@@ -39,17 +39,15 @@ int main()
 
     if (flex_is_dm_core() && flex_get_cluster_id() == 0)
     {
-        volatile uint16_t *dst = (volatile uint16_t *)l1_buf;
+        printf("[2D DMA] Before transfer — l1_buf[0][0..3]: 0x%04x 0x%04x 0x%04x 0x%04x\n",
+               l1_buf[0][0], l1_buf[0][1], l1_buf[0][2], l1_buf[0][3]);
 
-        printf("[2D DMA] Before transfer — L1 buf[0..3]: 0x%04x 0x%04x 0x%04x 0x%04x\n",
-               dst[0], dst[1], dst[2], dst[3]);
-
-        size_t row_bytes  = COLS_LOAD * ELEM_BYTES;          /* bytes per rep    */
-        size_t src_stride = COLS_HBM  * ELEM_BYTES;          /* HBM row pitch    */
-        size_t dst_stride = COLS_LOAD * ELEM_BYTES;          /* L1 row pitch     */
+        const size_t row_bytes  = sizeof(l1_buf[0]);     /* COLS_LOAD * ELEM_BYTES  */
+        const size_t src_stride = COLS_HBM * ELEM_BYTES; /* HBM row pitch           */
+        const size_t dst_stride = sizeof(l1_buf[0]);     /* L1 row pitch (packed)   */
 
         flex_dma_async_2d(
-            (uint64_t)(uintptr_t)l1_buf,  /* dst: L1 buffer                  */
+            (uint64_t)(uintptr_t)l1_buf,  /* dst: L1 matrix base              */
             hbm_addr(0),                  /* src: start of HBM matrix A       */
             row_bytes,                    /* size per rep                     */
             dst_stride,                   /* dst stride between reps          */
@@ -59,15 +57,14 @@ int main()
 
         flex_dma_async_wait_all();
 
-        printf("[2D DMA] After  transfer — first element of each loaded row:\n");
+        printf("[2D DMA] After  transfer — first/last element of each loaded row:\n");
         for (int r = 0; r < ROWS; ++r)
         {
-            /* first element of row r in the packed L1 buffer */
             printf("  row %d: 0x%04x 0x%04x ... 0x%04x\n",
                    r,
-                   dst[r * COLS_LOAD + 0],
-                   dst[r * COLS_LOAD + 1],
-                   dst[r * COLS_LOAD + COLS_LOAD - 1]);
+                   l1_buf[r][0],
+                   l1_buf[r][1],
+                   l1_buf[r][COLS_LOAD - 1]);
         }
     }
 
