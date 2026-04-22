@@ -10,7 +10,6 @@ ENTRY(_start)
 PHDRS
 {
   l3   PT_LOAD;
-  hbm  PT_LOAD;
 }
 
 /* Memory section should be provided in a separate, platform-specific */
@@ -150,7 +149,9 @@ SECTIONS
     _edram = .;
   } >L3 :l3
 
-  .hbm :
+  /* HBM section — NOLOAD. HBM data is injected at run-time via gvsoc's
+     --preload <elf> option; */
+  .hbm (NOLOAD) :
   {
     *(.hbm_prio)
     . = ALIGN(1024);
@@ -158,6 +159,6 @@ SECTIONS
     *(.hbm*)
     . = ALIGN(1024);
     __hbm_heap_start = .;
-  } >HBM :hbm
+  } >HBM
 
 }

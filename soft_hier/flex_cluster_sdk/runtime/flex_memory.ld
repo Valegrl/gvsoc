@@ -13,7 +13,6 @@ ENTRY(_start)
 PHDRS
 {
   l2_phdr  PT_LOAD;
-  hbm_phdr PT_LOAD;
 }
 
 SECTIONS
@@ -139,13 +138,14 @@ SECTIONS
     __l2_alloc_base = ALIGN(0x10);
   } > l2 :l2_phdr
 
-  /* HBM section */
-  .hbm : {
+  /* HBM section — NOLOAD. HBM data is injected at run-time via gvsoc's
+     --preload <elf> option */
+  .hbm (NOLOAD) : {
     *(.hbm_prio)
     . = ALIGN(1024);
     *(.hbm)
     *(.hbm*)
     . = ALIGN(1024);
     __hbm_heap_start = .;
-  } > hbm :hbm_phdr
+  } > hbm
 }
