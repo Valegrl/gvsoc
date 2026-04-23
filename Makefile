@@ -186,6 +186,18 @@ ifdef cfg
 	config_file = "$(cfg)"
 endif
 
+# Auto-derive the Mempool SW config (minpool|mempool|terapool) from cfg= when
+# it matches the preset naming convention soft_hier/flex_cluster/configs/arch_<name>.py.
+# Explicit config=<name> from the command line always wins.
+ifdef cfg
+ifndef config
+cfg_preset := $(patsubst arch_%.py,%,$(notdir $(cfg)))
+ifneq ($(filter $(cfg_preset),minpool mempool terapool),)
+config := $(cfg_preset)
+endif
+endif
+endif
+
 config:
 	rm -rf pulp/pulp/chips/flex_cluster
 	cp -rf soft_hier/flex_cluster pulp/pulp/chips/flex_cluster

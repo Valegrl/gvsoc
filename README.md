@@ -1,183 +1,181 @@
-# GVSoC
+# SoftHier (x MemPool) Simulation Model in GVSoC 🚀
 
-GVSoC is the PULP chips simulator that is natively included in the Pulp SDK and is described and evaluated fully in Bruschi et al. [\[arXiv:2201.08166v1\]](https://arxiv.org/abs/2201.08166).
+## Attention
 
+**This is the tmp branch only for dev purpose.*
+*
+## SoftHier Architecture Overview 🏗️
 
-## GVSoC documentations
+![SoftHier Architecture Diagram](docs/figures/SoftHier_Arch.png)
 
-The user documentation, focusing on how to use GVSOC, is available [here](https://gvsoc.readthedocs.io/en/latest/).
+## OS Requirements Installation 🖥️
 
-The developer documentation, focusing on how to develop models or extend GVSOC is available [here] (https://gvsoc-developer.readthedocs.io/en/latest/).
+The following instructions are designed for a fresh installation of Ubuntu 22.04 (Jammy Jellyfish).
 
-## GVSoC Tutorial
-
-If you want to learn more about GVSoC, get started through the tutorial available [here](https://gvsoc-developer.readthedocs.io/en/latest/tutorials.html). This tutorial provides hands-on practice on building systems on GVSoC and extracting the performance results.
-
-
-## OS Requirements installation
-
-These instructions were developed using a fresh Ubuntu 22.04 (Jammy Jellyfish).
-
-The following packages needed to be installed:
-
-~~~~~shell
-sudo apt-get install -y build-essential git doxygen python3-pip libsdl2-dev curl cmake gtkwave libsndfile1-dev rsync autoconf automake texinfo libtool pkg-config libsdl2-ttf-dev wget sphinx-build doxygen
-~~~~~
-
-These are the packages neded on a Fedora:
-
-~~~~~shell
-sudo dnf install -y make gcc cmake ninja-build.x86_64 g++ pip lz4-devel ccache glibc-devel.i686 zlib-ng-compat-devel.i686 SDL2 SDL2-devel SDL2_ttf-devel.x86_64 SDL2_image-devel.x86_64 wget2 sphinx-build doxygen
-~~~~~
-
-Please also check any README.md in the submodules for target-specific requirements, like for example pulp/README.md.
-
-## Python requirements
-
-Additional Python packages are needed and can be installed with the following commands from root folder:
+To install the required packages, run:
 
 ```bash
-git submodule update --init --recursive -j8
-pip3 install -r core/requirements.txt
-pip3 install -r gapy/requirements.txt
+sudo apt-get install -y build-essential git doxygen python3-pip libsdl2-dev curl cmake gtkwave libsndfile1-dev rsync autoconf automake texinfo libtool pkg-config libsdl2-ttf-dev
 ```
 
-## Installation
+## Toolchain and Shell Requirements 🔧
 
-Get submodules and compile GVSoC with this command:
+GVSoC requires the following tools and versions:
 
-~~~~~shell
-make all TARGETS=<target>
-~~~~~
+- **g++** and **gcc** versions >= 11.2.0
+- **cmake** version >= 3.18.1
+- **Python** version >= 3.11.3
 
-<target> should indicate the target for which GVSoC must be build. This can for example be generic targets rv32 or rv64. 
+Please ensure your toolchain meets these requirements. 
 
-On ETH network, please use this command to get the proper version of gcc and cmake:
+Also please make sure you are using the bash shell for SoftHier Simulation:
 
-~~~~~shell
-CXX=g++-14.2.0 CC=gcc-14.2.0 CMAKE=cmake-3.18.1 make all TARGETS=pulp-open
-~~~~~
-
-## Usage
-
-The following example can be launched on pulp-open:
-
-~~~~~shell
-./install/bin/gvsoc --target=pulp-open --binary examples/pulp-open/hello image flash run
-~~~~~
-
-## Citing
-
-If you intend to use or reference GVSoC for an academic publication, please consider citing it:
-
+```bash
+bash
 ```
-@INPROCEEDINGS{9643828,
-	author={Bruschi, Nazareno and Haugou, Germain and Tagliavini, Giuseppe and Conti, Francesco and Benini, Luca and Rossi, Davide},
-	booktitle={2021 IEEE 39th International Conference on Computer Design (ICCD)},
-	title={GVSoC: A Highly Configurable, Fast and Accurate Full-Platform Simulator for RISC-V based IoT Processors},
-	year={2021},
-	volume={},
-	number={},
-	pages={409-416},
-	doi={10.1109/ICCD53106.2021.00071}}
-```
-
-## Using GVSoC with DRAMsys
-
-If you want to use DRAMsys with GVSoC follow the steps mentioned in [DRAMsys.md](./DRAMSys.md)
-
----
 
 ## Getting Started with SoftHier Simulation 🚀
 
-### Set Up the Environment 🏁
+### Clone the Repository and Set Up the Environment 🏁
 
-Initialize the simulator environment by running:
+Follow these steps to set up the SoftHier simulation environment:
 
-```bash
-source sourceme.sh
-```
+1. **Clone the repository** and navigate into the project directory:
+
+   ```bash
+   git clone https://github.com/Valegrl/gvsoc.git -b soft_hier_mempool soft_hier_mempool
+   cd soft_hier_mempool
+   ```
+
+2. **Initialize the simulator environment** by running:
+
+   ```bash
+   source sourceme.sh
+   ```
 
 ### Build and Run the SoftHier Simulation Model 🧱
 
-1. **Build the SoftHier hardware model** 🛠️
+**Build the SoftHier hardware model**: 🛠️
 
    ```bash
-   make tmp_hw
+   make hw
    ```
-
-   This performs a clean build, applies the upstream FlooNoC patch, and compiles the `flex_cluster` target.
-   The default architecture configuration is `soft_hier/flex_cluster/flex_cluster_arch.py`. To use a custom one:
+The default configuration file is located at `soft_hier/flex_cluster/flex_cluster_arch.py` and builds the **Mempool** preset (256 cores/cluster). To use a custom architecture configuration, specify the file path as follows:
 
    ```bash
-   cfg=<path/to/your/architecture/configuration/file> make tmp_hw
+   cfg=<path/to/your/architecture/configuration/file> make hw
    ```
 
-2. **Run the simulation** with a binary 🎮
+   Three ready-made Mempool-family presets ship in `soft_hier/flex_cluster/configs/`:
 
    ```bash
-   ./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary <path/to/your/binary.elf> run --trace=/chip/cluster_0/redmule
+   # Minpool (16 cores/cluster)
+   cfg=soft_hier/flex_cluster/configs/arch_minpool.py  make hw
+
+   # Mempool (256 cores/cluster) -- same as the default
+   cfg=soft_hier/flex_cluster/configs/arch_mempool.py  make hw
+
+   # Terapool (1024 cores/cluster)
+   cfg=soft_hier/flex_cluster/configs/arch_terapool.py make hw
    ```
 
-   - `--binary`: Specifies the executable binary to load.
-   - `--trace`: Selects which component's trace logs are generated.
+   The same `cfg=` switch works with the `hs` target below; the Makefile auto-derives the matching Mempool SW `config=` (minpool/mempool/terapool) from the `cfg=` filename, so `-DNUM_CORES` etc. are forwarded to the CMake SW build automatically. When swapping presets after an earlier build, also rebuild the software (`make sw` / `make hs`) so the binary's sizes match the newly configured HW -- otherwise the linker may reuse stale `arch.ld` values from the previous preset.
+
 
 ### Build the Default Binary 💾
-
-To build the default binary from `soft_hier/flex_cluster_sdk/app_example`, run:
-
-```bash
-make sw
-```
-
-The generated binary `sw_build/softhier.elf` and dump file `sw_build/softhier.dump` are placed in `sw_build/`.
+To build the default binary (default Mempool) from the source code in `soft_hier/flex_cluster_sdk/app_example`, run:
+   ```bash
+   make sw
+   # Presets:
+   # make config=mempool sw
+   # make config=minpool sw
+   # make config=terapool sw
+   ```
+The generated binary `sw_build/softhier.elf` and the dump file `sw_build/softhier.dump` will be located in the `sw_build` directory.
 
 ### Build a Custom Binary ✏️
+To build your own binary:
 
-1. Prepare your source code in a folder with a `CMakeLists.txt` that exports sources and include paths:
-
+1. Prepare your source code in a folder with a `CMakeLists.txt` that defines the source files and include paths. For example:
    ```cmake
+   # CMakeLists.txt example
    set(SRC_SOURCES
        ${CMAKE_CURRENT_SOURCE_DIR}/main.c
    )
-
+   
    set(SOURCES ${SRC_SOURCES} PARENT_SCOPE)
    set(INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include PARENT_SCOPE)
    ```
 
-2. Build by pointing `app` to your folder:
-
+2. Run the following command, replacing `<folder/of/your/code>` with the path to your source code folder:
    ```bash
    app=<folder/of/your/code> make sw
    ```
 
+This will compile the binary using the specified folder. The generated binary `sw_build/softhier.elf` and the dump file `sw_build/softhier.dump` will be located in the `sw_build` directory.
+
+3. **Run the simulation** with an example binary: 🎮
+
+   ```bash
+   ./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary examples/SoftHier/binary/example.elf run --trace=/chip/cluster_0 --preload=my_preload.elf
+   ```
+
+   - `--binary`: Specifies the executable binary to be loaded for the SoftHier simulation.
+   - `--trace`: Indicates which component's trace logs should be generated during the simulation.
+   - `--preload`: Loads an additional ELF file into memory before execution (e.g., pre-initialized HBM/DRAM data).
+
+   Or run sw_build/softhier.elf through Makefile:
+
+   ```bash
+   pld=my_preload.elf make run 
+   ```
+
+   - `pld` is equivalent to `--preload` when executing directly.
+
+   **Generating HBM Preload Data**
+   To generate an HBM preload binary from NumPy data, run:
+   ```bash
+   python soft_hier/flex_cluster_sdk/tests/05_HBM_accesses/preload/gen_preload1.py
+   ```
+   This will create the preload binary at:
+   ```
+   soft_hier/flex_cluster_sdk/tests/05_HBM_accesses/preload/my_preload.py
+   ```
+
+
 ### Build Customized Hardware and Software (Highly Recommended) 🧩
 
-The `hs` target builds hardware and software together in one step.
-It uses the local FlooNoC sources (without fetching from upstream); run `make tmp_hw` first if you need the upstream FlooNoC patch applied before doing iterative `hs` builds.
+For convenient and flexible development, use the `hs` Makefile target to build both hardware and software together. This is particularly useful for custom architecture configurations and software development. Run:
 
 ```bash
 cfg=<path/to/your/architecture/configuration/file> app=<folder/of/your/code> make hs
 ```
 
-**Example — default app with default architecture:**
+We provide example architecture configurations and software source code in the repository. Try the following:
 
+#### Example 1: Hello World 🌍
 ```bash
-app=soft_hier/flex_cluster_sdk/app_example make hs; make run
+cfg=soft_hier/flex_cluster/configs/arch_minpool.py app=soft_hier/flex_cluster_sdk/app_example make hs; make run_only
+```
+
+#### Example 2: TCDM accesses
+```bash
+cfg=soft_hier/flex_cluster/configs/arch_minpool.py app=soft_hier/flex_cluster_sdk/tests/06_TCDM_accesses make hs
+pld=soft_hier/flex_cluster_sdk/tests/05_HBM_accesses/preload/my_preload.elf make run_only
 ```
 
 ## SoftHier Visualization 📈
 
-To visualize a SoftHier simulation:
-
-1. Run the simulation with the `runv` target (generates a trace log).
-2. Convert the trace to Perfetto format with the `pfto` target.
-
-Integrated example:
-
+To visualize a SoftHier simulation, follow these steps:
+1. Run with the `runv` Makefile target.
+2. Generate a Perfetto-format trace file using the `pfto` target.
+An integrated example
 ```bash
-cfg=<arch_cfg> app=<app_folder> make hs runv pfto
+<args> make hs runv pfto
 ```
 
-The trace file is saved at `sw_build/perfetto.json`.  
-Open it at 👉 [https://ui.perfetto.dev/](https://ui.perfetto.dev/)
+The trace file will be saved at:  
+📂 `sw_build/perfetto.json`
+
+To view the trace, open the following URL in your browser:  
+👉 [Perfetto UI](https://ui.perfetto.dev/)

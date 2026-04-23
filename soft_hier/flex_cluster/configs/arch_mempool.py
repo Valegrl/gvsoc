@@ -36,10 +36,7 @@ class FlexClusterArch:
 
         self.instruction_mem_base    = 0x80000000
 
-        # Mempool cluster configuration (Mempool) -- default preset.
-        # For Minpool (16 cores) or Terapool (1024 cores) select a preset with
-        #   cfg=soft_hier/flex_cluster/configs/arch_minpool.py  make hw
-        #   cfg=soft_hier/flex_cluster/configs/arch_terapool.py make hw
+        # Mempool cluster configuration (Mempool)
         self.terapool                    = False
         self.num_core_per_cluster        = 256
         self.nb_cores_per_tile           = 4
