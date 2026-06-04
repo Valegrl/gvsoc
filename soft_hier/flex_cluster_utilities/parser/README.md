@@ -80,7 +80,7 @@ file.
 | `PE_peak` | Per-pool non-GEMM peak throughput, TFLOPS |
 | `GEMM_peak` | Per-pool GEMM peak throughput, TFLOPS (not scaled by `PE_utilization`) |
 | `PE_utilization` | Fraction in `[0, 1]` applied to `PE_peak` only |
-| `throughput` | Per-cluster wall-clock budget [ms]. The split is computed per mode: `seq`/`ctt` use `compute + transfer` (serialized), `cwt` uses `max(compute, transfer)` (overlapped), so `cwt` generally yields fewer, larger clusters. Drives the cluster split; omit to skip splitting |
+| `throughput` | Per-cluster wall-clock budget [ms]. The split is computed per mode: `seq`/`ctt` use `compute + transfer` (serialized), `cwt` uses `max(compute, transfer)` (overlapped), so `cwt` generally yields fewer, larger clusters. It **fixes the cluster count `N`**; the work is then rebalanced within those `N` clusters to minimise the real bottleneck (see [Throughput rebalancing](#throughput-rebalancing)). Omit to skip splitting |
 | `bandwidth_gbs` | Inter-cluster / HBM bandwidth [GB/s]. Transfer time = `bytes / (bandwidth_gbs * 1e6)` ms. Omit or `0` to count compute only |
 | `frequency` | Clock in Hz; used to convert latencies into cycles for the generated tests |
 
@@ -93,8 +93,9 @@ file.
 > counts toward `throughput` (and both splits coincide).
 >
 > The printed "Pipeline cluster split" section shows **both** splits — serialized
-> (`seq`/`ctt`) and overlapped (`cwt`) — so you can compare cluster counts and the
-> per-cluster wall time of each.
+> (`seq`/`ctt`) and overlapped (`cwt`). Each is the **rebalanced** split and is headed
+> by a `>>> Best throughput found = … ms` line (the minimised bottleneck for that
+> pool/mode); see [Throughput rebalancing](#throughput-rebalancing).
 >
 > **The `cwt` budget `max(compute, transfer)` is a *steady-state* figure.** It is
 > the amortized per-item cost only once the pipeline is full. The generated
@@ -111,6 +112,24 @@ file.
 > the `max(compute, transfer)` split only pays off as `N_ITER ≫ N`. So `cwt`'s
 > benefit is *fewer clusters at the same steady-state throughput*, not lower
 > single-item latency — raise `--iterations` to amortize the longer warm-up.
+
+### Throughput rebalancing
+
+`throughput` is a *starting budget*, not the final answer. For each pool and mode the
+tool runs two phases:
+
+1. **Split levels over clusters** — the greedy left-to-right packer fills clusters up to
+   the budget, which fixes the cluster count `N`.
+2. **Rebalance within `N`** — holding `N` constant, it pushes the per-cluster wall as low
+   as possible so the work (compute **and** hand-off transfers) is spread evenly,
+   minimising the slowest stage. Because a pipeline's throughput is set by its slowest
+   stage, this is the best achievable throughput for that `N`.
+
+The optimum is found by binary-searching the budget while reusing the same greedy as a
+feasibility test — the smallest budget that still fits the work into `N` clusters. The
+result is printed as `>>> Best throughput found = X ms` at the head of each pool/mode
+split, and the generated tests use the rebalanced distribution. This step **never
+changes `N`**.
 
 ## Usage
 

@@ -92,7 +92,7 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +181,12 @@ class Results:
     clusters:        Dict[str, List[ClusterSplit]]    = field(default_factory=dict)
     # Overlapped split (cwt: wall = max(compute, transfer)).
     clusters_overlap: Dict[str, List[ClusterSplit]]   = field(default_factory=dict)
+    # Best (minimised) per-cluster wall = pipeline throughput, after rebalancing
+    # the work over the fixed cluster count.  Keyed by pool, one per wall model.
+    best_throughput:         Dict[str, float]         = field(default_factory=dict)  # seq/ctt
+    best_throughput_overlap: Dict[str, float]         = field(default_factory=dict)  # cwt
+    # Original per-cluster budget from config.json (for the "[config budget …]" note).
+    throughput_budget:       float                    = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +514,76 @@ def _build_cluster_splits(
     return splits
 
 
+def _makespan(splits: List[ClusterSplit], overlap: bool) -> float:
+    """Pipeline bottleneck = the largest per-cluster wall over the split.
+
+    The steady-state throughput of the pipeline is set by its slowest stage, so
+    this max IS the throughput we want to minimise.  Uses the same wall model as
+    ``_print_cluster_table``: max(compute, transfer) when overlapped (cwt), else
+    compute + transfer (seq/ctt).
+    """
+    if not splits:
+        return 0.0
+    return max(
+        (max(cs.latency, cs.transfer_ms) if overlap else cs.latency + cs.transfer_ms)
+        for cs in splits
+    )
+
+
+def optimize_throughput(
+    blocks: List[Block],
+    row_lat: Dict[int, float],
+    n_target: int,
+    bandwidth_gbs: Optional[float],
+    overlap: bool,
+    budget_ms: float,
+    iters: int = 60,
+) -> Tuple[float, List[ClusterSplit]]:
+    """Lower the per-cluster wall budget as far as possible while keeping the
+    cluster count fixed at ``n_target``, then return the rebalanced split.
+
+    Reuses ``split_into_clusters`` as a feasibility oracle: ``K(T)`` = the number
+    of clusters the greedy needs for budget ``T`` is non-increasing in ``T``.
+    ``n_target`` is fixed at the original ``budget_ms`` split, so for every
+    ``T <= budget_ms`` we have ``K(T) >= n_target``; the smallest ``T`` with
+    ``K(T) <= n_target`` therefore has ``K(T) == n_target`` exactly -- the cluster
+    count is preserved automatically.  Binary-searching that smallest feasible
+    ``T`` minimises the bottleneck (= evenly spreads the work).
+
+    Returns ``(best_throughput, balanced_splits)`` where ``best_throughput`` is the
+    *actual* makespan of the returned split (so a single unsplittable, dominating
+    pass is reported honestly even if the search budget dipped below it).
+    """
+    def feasible(thr: float) -> bool:
+        return len(split_into_clusters(blocks, row_lat, thr,
+                                       bandwidth_gbs, overlap)) <= n_target
+
+    # hi is feasible by construction (K(budget_ms) == n_target); lo is the
+    # infeasible side.  ~60 halvings drive the gap well below FP noise; each
+    # probe is O(total passes), so the whole search is cheap.
+    lo, hi = 0.0, budget_ms
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        if feasible(mid):
+            hi = mid
+        else:
+            lo = mid
+
+    balanced = _build_cluster_splits(
+        split_into_clusters(blocks, row_lat, hi, bandwidth_gbs, overlap),
+        row_lat, bandwidth_gbs)
+
+    # Safety net: never hand back a different cluster count than requested. If a
+    # numerical edge (or any non-monotonic boundary) slipped through, fall back
+    # to the original budget split so N is guaranteed constant.
+    if len(balanced) != n_target:
+        balanced = _build_cluster_splits(
+            split_into_clusters(blocks, row_lat, budget_ms, bandwidth_gbs, overlap),
+            row_lat, bandwidth_gbs)
+
+    return _makespan(balanced, overlap), balanced
+
+
 def compute(layers: List[LayerRow], cfg: dict) -> Results:
     util  = cfg['PE_utilization']
     pools = list(cfg['PE_peak'].keys())
@@ -553,16 +629,24 @@ def compute(layers: List[LayerRow], cfg: dict) -> Results:
     if 'throughput' in cfg:
         throughput_ms = float(cfg['throughput'])
         bandwidth_gbs = cfg.get('bandwidth_gbs')
+        res.throughput_budget = throughput_ms
         for p in pools:
             row_lat = res.row_latencies[p]
-            res.clusters[p] = _build_cluster_splits(
-                split_into_clusters(blocks, row_lat, throughput_ms,
-                                    bandwidth_gbs, overlap=False),
-                row_lat, bandwidth_gbs)
-            res.clusters_overlap[p] = _build_cluster_splits(
-                split_into_clusters(blocks, row_lat, throughput_ms,
-                                    bandwidth_gbs, overlap=True),
-                row_lat, bandwidth_gbs)
+            # Two wall models: serialized (seq/ctt) and overlapped (cwt).  For
+            # each, the existing greedy "split levels over clusters" fixes the
+            # cluster count N at the budget; optimize_throughput then rebalances
+            # the work within those N clusters to push the bottleneck (= the
+            # pipeline throughput) as low as it will go.
+            for overlap, clusters_attr, best_attr in (
+                (False, res.clusters,         res.best_throughput),
+                (True,  res.clusters_overlap, res.best_throughput_overlap),
+            ):
+                n_target = len(split_into_clusters(
+                    blocks, row_lat, throughput_ms, bandwidth_gbs, overlap))
+                best_tp, balanced = optimize_throughput(
+                    blocks, row_lat, n_target, bandwidth_gbs, overlap, throughput_ms)
+                clusters_attr[p] = balanced
+                best_attr[p]     = best_tp
 
     # T52:W54 -- L1 footprint (bytes)
     max_w    = max(r.weights_bytes for r in layers)
@@ -579,17 +663,23 @@ def compute(layers: List[LayerRow], cfg: dict) -> Results:
 # ---------------------------------------------------------------------------
 
 def _print_cluster_table(pool: str, clusters: List[ClusterSplit],
-                         row_lat: Dict[int, float], *, overlap: bool) -> None:
+                         row_lat: Dict[int, float], *, overlap: bool,
+                         best_throughput: float, budget: float) -> None:
     """Print the per-cluster split table for one pool under one wall model.
 
     overlap selects the wall-clock budget: max(compute, transfer) for the
     compute-while-transfer (cwt) schedule, else compute + transfer (seq/ctt).
+    best_throughput is the minimised bottleneck after rebalancing the work over
+    the fixed cluster count; it is printed prominently at the head of the table.
     """
     label = ('Overlapped  (cwt: compute-while-transfer)' if overlap
              else 'Serialized  (seq / ctt: compute-then-transfer)')
     model = 'max(compute, transfer)' if overlap else 'compute + transfer'
     n_clusters = len(clusters)
     print(f'\nPool: {pool}  --  {label}')
+    print(f'  >>> Best throughput found = {best_throughput:.6g} ms  '
+          f'(min bottleneck over {n_clusters} clusters held constant; '
+          f'config budget {budget:.6g} ms)')
     print(f'  {n_clusters} cluster(s)  |  wall = {model}')
     for cs in clusters:
         print('  ' + '=' * 78)
@@ -681,10 +771,14 @@ def print_results(layers: List[LayerRow], res: Results,
         for p in pools:
             if show_serial and p in res.clusters:
                 _print_cluster_table(p, res.clusters[p],
-                                     res.row_latencies[p], overlap=False)
+                                     res.row_latencies[p], overlap=False,
+                                     best_throughput=res.best_throughput[p],
+                                     budget=res.throughput_budget)
             if show_overlap and p in res.clusters_overlap:
                 _print_cluster_table(p, res.clusters_overlap[p],
-                                     res.row_latencies[p], overlap=True)
+                                     res.row_latencies[p], overlap=True,
+                                     best_throughput=res.best_throughput_overlap[p],
+                                     budget=res.throughput_budget)
 
 
 # ---------------------------------------------------------------------------
