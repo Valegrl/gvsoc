@@ -93,6 +93,7 @@ class ClusterArch:
                         sync_itlv,
                         sync_special_mem,
                         soc_register_base,
+                        bank_size=1024,
                         auto_fetch=False):
 
         self.base                   = base
@@ -116,6 +117,7 @@ class ClusterArch:
         self.nb_groups                  = nb_groups
         self.total_cores                = nb_core_per_cluster
         self.bank_factor                = bank_factor
+        self.bank_size                  = bank_size
         self.axi_data_width             = axi_data_width
         self.nb_axi_masters_per_group   = nb_axi_masters_per_group
         self.nb_l2_banks                = nb_l2_banks
@@ -154,7 +156,8 @@ class ClusterUnit(gvsoc.systree.Component):
                                  nb_groups=arch.nb_groups, 
                                  total_cores=arch.total_cores, 
                                  bank_factor=arch.bank_factor,
-                                 axi_data_width=arch.axi_data_width, 
+                                 bank_size=arch.bank_size,
+                                 axi_data_width=arch.axi_data_width,
                                  nb_axi_masters_per_group=arch.nb_axi_masters_per_group)
 
         # Boot Rom

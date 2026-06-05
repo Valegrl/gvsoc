@@ -25,7 +25,7 @@ num_sub_groups_per_group ?= 4
 num_divsqrt_per_tile ?= 1
 
 # L1 scratchpad banking factor
-banking_factor ?= 16
+banking_factor ?= 8
 
 # Access latency between remote groups
 # Options: "7", "9" or "11":
@@ -41,7 +41,7 @@ axi_masters_per_group ?= 4
 dmas_per_group ?= 4 # Burst Length = 16
 
 # L1 size per bank (in dec)
-l1_bank_size ?= 1024
+l1_bank_size ?= 2048
 
 # Size of sequential memory per core (in bytes)
 # (must be a power of two)

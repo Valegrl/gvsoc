@@ -43,6 +43,7 @@ class FlexClusterArch:
         self.nb_sub_groups_per_group     = 1
         self.nb_groups                   = 4
         self.bank_factor                 = 4
+        self.bank_size                   = 1024
         self.axi_data_width              = 64
         self.nb_axi_masters_per_group    = 1
         self.instruction_mem_size        = 0x400000

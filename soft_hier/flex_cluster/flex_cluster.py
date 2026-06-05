@@ -132,6 +132,7 @@ class FlexClusterSystem(gvsoc.systree.Component):
                                         nb_sub_groups_per_group =   arch.nb_sub_groups_per_group,
                                         nb_groups               =   arch.nb_groups,
                                         bank_factor             =   arch.bank_factor,
+                                        bank_size               =   getattr(arch, 'bank_size', 1024),
                                         axi_data_width          =   arch.axi_data_width,
                                         nb_axi_masters_per_group=   arch.nb_axi_masters_per_group,
                                         nb_l2_banks             =   arch.nb_l2_banks,
