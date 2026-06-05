@@ -22,6 +22,7 @@ import memory.memory as memory
 from pulp.chips.flex_cluster.mempool_dma.flex_mempool_dma import FlexMemPoolDma
 from elftools.elf.elffile import *
 from pulp.mempool.mempool_cluster import Cluster
+from pulp.mempool.redmule_configurations import RedmuleParam
 from pulp.mempool.l2_subsystem import L2_subsystem
 from pulp.chips.flex_cluster.cluster_registers import ClusterRegisters
 from pulp.chips.flex_cluster.util_dumpper import UtilDumpper
@@ -76,6 +77,11 @@ class ClusterArch:
                         insn_base,
                         insn_size,
                         terapool,
+                        tensorpool,
+                        nb_redmule_tiles,
+                        redmule_height,
+                        redmule_width,
+                        redmule_regs,
                         nb_cores_per_tile,
                         nb_sub_groups_per_group,
                         nb_groups,
@@ -100,6 +106,11 @@ class ClusterArch:
         # Cluster configuration
         self.async_l1_interco           = False
         self.terapool                   = terapool
+        self.tensorpool                 = tensorpool
+        self.nb_redmule_tiles           = nb_redmule_tiles
+        self.redmule_height             = redmule_height
+        self.redmule_width              = redmule_width
+        self.redmule_regs               = redmule_regs
         self.nb_cores_per_tile          = nb_cores_per_tile
         self.nb_sub_groups_per_group    = nb_sub_groups_per_group
         self.nb_groups                  = nb_groups
@@ -127,11 +138,17 @@ class ClusterUnit(gvsoc.systree.Component):
 
         nb_axi_masters = arch.nb_axi_masters_per_group * arch.nb_groups
 
+        # Tensor engines (RedMulE): build config only when engines are present
+        redmule_config = RedmuleParam(arch.redmule_height, arch.redmule_width, arch.redmule_regs) if arch.nb_redmule_tiles > 0 else None
+
         #Mempool cluster
-        mempool_cluster=Cluster( self, 'mempool_cluster', 
-                                 async_l1_interco=arch.async_l1_interco, 
-                                 terapool=arch.terapool, 
-                                 parser=parser, 
+        mempool_cluster=Cluster( self, 'mempool_cluster',
+                                 async_l1_interco=arch.async_l1_interco,
+                                 redmule_config=redmule_config,
+                                 tensorpool=arch.tensorpool,
+                                 nb_redmule_tiles=arch.nb_redmule_tiles,
+                                 terapool=arch.terapool,
+                                 parser=parser,
                                  nb_cores_per_tile=arch.nb_cores_per_tile,
                                  nb_sub_groups_per_group=arch.nb_sub_groups_per_group, 
                                  nb_groups=arch.nb_groups, 
@@ -148,7 +165,7 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # Cluster CSRs (extended with inter-cluster barrier config)
         cluster_regs = ClusterRegisters(self, 'ctrl_registers',
-            wakeup_latency=18 if arch.terapool else 15,
+            wakeup_latency=18 if arch.nb_sub_groups_per_group > 1 else 15,
             cluster_id=arch.cluster_id,
             num_cluster_x=arch.num_cluster_x,
             num_cluster_y=arch.num_cluster_y,

@@ -25,7 +25,7 @@ class FlexClusterArch:
         self.num_cluster_y           = 4
 
         self.cluster_tcdm_base       = 0x00000000
-        self.cluster_tcdm_size       = 0x00100000
+        self.cluster_tcdm_size       = 0x00400000
         self.cluster_tcdm_remote     = 0x30000000
 
         self.cluster_stack_base      = 0x10000000
@@ -36,24 +36,28 @@ class FlexClusterArch:
 
         self.instruction_mem_base    = 0x80000000
 
-        # Mempool cluster configuration (Mempool)
+        # Mempool cluster configuration (Tensorpool)
+        # Heterogeneous: 256 PE (as Mempool) + 16 RedMulE tensor engines,
+        # sub-group division (as Terapool) and a 4 MB L1 (as Terapool).
         self.terapool                    = False
         self.num_core_per_cluster        = 256
         self.nb_cores_per_tile           = 4
-        self.nb_sub_groups_per_group     = 1
+        self.nb_sub_groups_per_group     = 4
         self.nb_groups                   = 4
-        self.bank_factor                 = 4
+        # 256 cores * 16 * 1KB = 4 MB L1
+        self.bank_factor                 = 16
         self.axi_data_width              = 64
-        self.nb_axi_masters_per_group    = 1
+        self.nb_axi_masters_per_group    = 4
         self.instruction_mem_size        = 0x400000
         self.nb_l2_banks                 = 4
 
-        # Tensor engines (RedMulE) -- disabled for this preset
-        self.tensorpool                  = False
-        self.nb_redmule_tiles            = 0
-        self.redmule_height              = 0
-        self.redmule_width               = 0
-        self.redmule_regs                = 0
+        # Tensor engines (RedMulE)
+        self.tensorpool                  = True
+        # 16 tensor engines per cluster
+        self.nb_redmule_tiles            = 16
+        self.redmule_height              = 8
+        self.redmule_width               = 32
+        self.redmule_regs                = 3
 
         #HBM
         self.hbm_start_base          = 0xc0000000

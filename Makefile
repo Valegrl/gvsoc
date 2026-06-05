@@ -102,13 +102,21 @@ SYSTEMC_GIT_URL := https://github.com/accellera-official/systemc.git
 SYSTEMC_INSTALL_DIR := $(PWD)/third_party/systemc_install
 
 update:
-	cd pulp && git diff > ../soft_hier/gvsoc_pulp.patch
-	cd core && git add models/cpu && git diff --cached > ../soft_hier/gvsoc_core.patch
+	cd pulp && git add -N tensorpool.py pulp/mempool/redmule_configurations.py && \
+		git diff > ../soft_hier/gvsoc_pulp.patch && \
+		git reset -q -- tensorpool.py pulp/mempool/redmule_configurations.py
+	cd core && git add -N models/utils/common_cells/or.cpp && \
+		git diff -- models/utils/common_cells.py models/utils/common_cells/or.cpp \
+		> ../soft_hier/gvsoc_core.patch && \
+		git reset -q -- models/utils/common_cells/or.cpp
 
 dramsys_apply_patch:
 	git submodule update --init --recursive
 	if cd pulp && git apply --check ../soft_hier/gvsoc_pulp.patch; then \
 		git apply ../soft_hier/gvsoc_pulp.patch;\
+	fi
+	if cd core && git apply --check ../soft_hier/gvsoc_core.patch; then \
+		git apply ../soft_hier/gvsoc_core.patch;\
 	fi
 	cp -rf soft_hier/flex_cluster pulp/pulp/chips/flex_cluster
 
@@ -186,13 +194,13 @@ ifdef cfg
 	config_file = "$(cfg)"
 endif
 
-# Auto-derive the Mempool SW config (minpool|mempool|terapool) from cfg= when
+# Auto-derive the Mempool SW config (minpool|mempool|terapool|tensorpool) from cfg= when
 # it matches the preset naming convention soft_hier/flex_cluster/configs/arch_<name>.py.
 # Explicit config=<name> from the command line always wins.
 ifdef cfg
 ifndef config
 cfg_preset := $(patsubst arch_%.py,%,$(notdir $(cfg)))
-ifneq ($(filter $(cfg_preset),minpool mempool terapool),)
+ifneq ($(filter $(cfg_preset),minpool mempool terapool tensorpool),)
 config := $(cfg_preset)
 endif
 endif

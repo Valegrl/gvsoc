@@ -48,6 +48,13 @@ class FlexClusterArch:
         self.instruction_mem_size        = 0x400000
         self.nb_l2_banks                 = 4
 
+        # Tensor engines (RedMulE) -- disabled for this preset
+        self.tensorpool                  = False
+        self.nb_redmule_tiles            = 0
+        self.redmule_height              = 0
+        self.redmule_width               = 0
+        self.redmule_regs                = 0
+
         #HBM
         self.hbm_start_base          = 0xc0000000
         self.hbm_node_addr_space     = 0x00200000

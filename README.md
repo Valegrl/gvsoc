@@ -66,7 +66,7 @@ The default configuration file is located at `soft_hier/flex_cluster/flex_cluste
    cfg=<path/to/your/architecture/configuration/file> make hw
    ```
 
-   Three ready-made Mempool-family presets ship in `soft_hier/flex_cluster/configs/`:
+   Four ready-made Mempool-family presets ship in `soft_hier/flex_cluster/configs/`:
 
    ```bash
    # Minpool (16 cores/cluster)
@@ -77,9 +77,12 @@ The default configuration file is located at `soft_hier/flex_cluster/flex_cluste
 
    # Terapool (1024 cores/cluster)
    cfg=soft_hier/flex_cluster/configs/arch_terapool.py make hw
+
+   # Tensorpool (256 cores/cluster + 16 RedMulE tensor engines, sub-groups, 4 MB L1)
+   cfg=soft_hier/flex_cluster/configs/arch_tensorpool.py make hw
    ```
 
-   The same `cfg=` switch works with the `hs` target below; the Makefile auto-derives the matching Mempool SW `config=` (minpool/mempool/terapool) from the `cfg=` filename, so `-DNUM_CORES` etc. are forwarded to the CMake SW build automatically. When swapping presets after an earlier build, also rebuild the software (`make sw` / `make hs`) so the binary's sizes match the newly configured HW -- otherwise the linker may reuse stale `arch.ld` values from the previous preset.
+   The same `cfg=` switch works with the `hs` target below; the Makefile auto-derives the matching Mempool SW `config=` (minpool/mempool/terapool/tensorpool) from the `cfg=` filename, so `-DNUM_CORES` etc. are forwarded to the CMake SW build automatically. When swapping presets after an earlier build, also rebuild the software (`make sw` / `make hs`) so the binary's sizes match the newly configured HW -- otherwise the linker may reuse stale `arch.ld` values from the previous preset.
 
 
 ### Build the Default Binary 💾
@@ -90,6 +93,7 @@ To build the default binary (default Mempool) from the source code in `soft_hier
    # make config=mempool sw
    # make config=minpool sw
    # make config=terapool sw
+   # make config=tensorpool sw
    ```
 The generated binary `sw_build/softhier.elf` and the dump file `sw_build/softhier.dump` will be located in the `sw_build` directory.
 
