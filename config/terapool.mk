@@ -2,77 +2,47 @@
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
-# Author: Marco Bertuletti, ETH Zurich
+# Author: Matheus Cavalcante, ETH Zurich
 
-##################
-##  TensorPool  ##
-##################
+################
+##  TeraPool  ##
+################
+
+# Global Control
+terapool ?= 1
 
 # Number of cores
-num_cores ?= 256
+num_cores ?= 1024
 
 # Number of groups
 num_groups ?= 4
 
-# Number of cores per TensorPool tile
-num_cores_per_tile ?= 4
+# Number of cores per Terapool tile
+num_cores_per_tile ?= 8
 
-# Number of sub groups per Tensorpool group
+# Number of sub groups per Terapool group
 num_sub_groups_per_group ?= 4
 
 # Number of shared divsqrt units per MemPool tile
 # Defaults to 1 if xDivSqrt is activated
-num_divsqrt_per_tile ?= 1
+num_divsqrt_per_tile ?= 2
 
 # L1 scratchpad banking factor
-banking_factor ?= 16
+banking_factor ?= 4
 
 # Access latency between remote groups
 # Options: "7", "9" or "11":
-remote_group_latency_cycles ?= 9
+remote_group_latency_cycles ?= 7
 
 # Radix for hierarchical AXI interconnect
-axi_hier_radix ?= 17
+axi_hier_radix ?= 9
 
 # Number of AXI masters per group
 axi_masters_per_group ?= 4
 
 # Number of DMA backends in each group
-dmas_per_group ?= 4 # Burst Length = 16
-
-# L1 size per bank (in dec)
-l1_bank_size ?= 1024
-
-# Size of sequential memory per core (in bytes)
-# (must be a power of two)
-seq_mem_size := 512
-
-# Size of stack in sequential memory per core (in bytes)
-stack_size := 512
+dmas_per_group ?= 4 # Brust Length = 16
 
 # L2 Banks/Channels
-l2_size  ?= 4194304  # 400000
-l2_banks ?= 4
-
-#############################
-##  RedMulE Configuration  ##
-#############################
-
-num_redmule_tiles ?= 16
-
-# RedMulE engine size
-redmule_height ?= 8
-redmule_width ?= 32
-redmule_regs ?= 3
-rob_depth ?= 16
-
-###########################
-##  Burst configuration  ##
-###########################
-
-# Reads in the TCDM interconnect are sent as bursts
-tcdm_burst ?= 1
-
-# Grouped request/responses are use the same valid/ready handshake
-burst_greq ?= 2
-burst_grsp ?= 4
+l2_banks = 16
+l2_size  ?= 16777216 # 1000000
