@@ -45,6 +45,14 @@ while(_tmp GREATER 1)
     math(EXPR LOG2_NUM_CORES_PER_TILE "${LOG2_NUM_CORES_PER_TILE} + 1")
 endwhile()
 
+# log2(NUM_CORES)
+math(EXPR _tmp "${NUM_CORES}")
+set(LOG2_NUM_CORES 0)
+while(_tmp GREATER 1)
+    math(EXPR _tmp "${_tmp} / 2")
+    math(EXPR LOG2_NUM_CORES "${LOG2_NUM_CORES} + 1")
+endwhile()
+
 # log2(SEQ_MEM_SIZE)
 math(EXPR _tmp "${SEQ_MEM_SIZE}")
 set(LOG2_SEQ_MEM_SIZE 0)
@@ -86,6 +94,8 @@ set(MEMPOOL_DEFINES
     -DLOG2_STACK_SIZE=${LOG2_STACK_SIZE}
     -DXQUEUE_SIZE=${XQUEUE_SIZE}
     -DBOOT_ADDR=${BOOT_ADDR}
+    -DNUM_REDMULE_TILES=${NUM_REDMULE_TILES}
+    -DLOG2_NUM_CORES=${LOG2_NUM_CORES}
 )
 
 # Preprocess arch.ld.c -> arch.ld

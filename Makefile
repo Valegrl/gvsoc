@@ -252,7 +252,8 @@ ifdef config
     -DSEQ_MEM_SIZE=$(seq_mem_size) \
     -DSTACK_SIZE=$(stack_size) \
     -DXQUEUE_SIZE=$(xqueue_size) \
-    -DBOOT_ADDR=$(boot_addr)
+    -DBOOT_ADDR=$(boot_addr) \
+    -DNUM_REDMULE_TILES=$(num_redmule_tiles)
 endif
 
 sw:

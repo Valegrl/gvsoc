@@ -97,6 +97,14 @@ To build the default binary (default Mempool) from the source code in `soft_hier
    ```
 The generated binary `sw_build/softhier.elf` and the dump file `sw_build/softhier.dump` will be located in the `sw_build` directory.
 
+> [!WARNING]
+> **Tensorpool RedMulE software:** to build SW for the `tensorpool` preset with full RedMulE
+> compatibility, use the upstream MemPool RedMulE repository
+> (https://github.com/Valegrl/mempool, branch `main`) — not this repo.
+> This repository ships only the lightweight `light_redmule` GVSoC model and a minimal
+> `mempool_redmule_*` driver (`runtime/mempool/runtime.h`); the full RedMulE software stack
+> (HAL, kernels, golden data) and its build dependencies live there.
+
 ### Build a Custom Binary ✏️
 To build your own binary:
 

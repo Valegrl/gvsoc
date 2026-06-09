@@ -23,6 +23,7 @@ LLVM_INSTALL_DIR   ?= $(INSTALL_DIR)/llvm
 OMP_DIR            ?= $(ROOT_DIR)/omp
 KERNELS_DIR        ?= $(abspath $(ROOT_DIR)/../kernels)
 DATA_DIR           ?= $(abspath $(ROOT_DIR)/../data)
+REDMULE_DIR        ?= $(abspath $(MEMPOOL_DIR)/hardware/deps/redmule/sw)
 
 COMPILER      ?= gcc
 XPULPIMG      ?= $(xpulpimg)
@@ -89,12 +90,13 @@ RISCV_STRIP   ?= $(RISCV_PREFIX)strip
 # Defines
 DEFINES += -DPRINTF_DISABLE_SUPPORT_FLOAT -DPRINTF_DISABLE_SUPPORT_LONG_LONG -DPRINTF_DISABLE_SUPPORT_PTRDIFF_T
 DEFINES += -DNUM_CORES=$(num_cores)
+DEFINES += -DLOG2_NUM_CORES=$(shell echo "l($(num_cores))/l(2)" | bc -l | awk '{printf("%d", $$1)}')
 DEFINES += -DNUM_GROUPS=$(num_groups)
 DEFINES += -DNUM_CORES_PER_TILE=$(num_cores_per_tile)
 DEFINES += -DBANKING_FACTOR=$(banking_factor)
 DEFINES += -DNUM_BANKS=$(shell awk 'BEGIN{print $(banking_factor)*$(num_cores)}')
-DEFINES += -DNUM_CORES_PER_GROUP=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
-DEFINES += -DNUM_TILES_PER_GROUP=$(shell awk 'BEGIN{print ($(num_cores)/$(num_groups))/$(num_cores_per_tile)}')
+DEFINES += -DNUM_CORES_PER_GROUP=$(shell awk 'BEGIN{print int($(num_cores)/$(num_groups))}')
+DEFINES += -DNUM_TILES_PER_GROUP=$(shell awk 'BEGIN{print int($(num_cores)/$(num_cores_per_tile))}')
 DEFINES += -DLOG2_NUM_CORES_PER_TILE=$(shell awk 'BEGIN{print log($(num_cores_per_tile))/log(2)}')
 DEFINES += -DBOOT_ADDR=$(boot_addr)
 DEFINES += -DL1_BANK_SIZE=$(l1_bank_size)
@@ -105,6 +107,9 @@ DEFINES += -DLOG2_SEQ_MEM_SIZE=$(shell awk 'BEGIN{print log($(seq_mem_size))/log
 DEFINES += -DSTACK_SIZE=$(stack_size)
 DEFINES += -DLOG2_STACK_SIZE=$(shell awk 'BEGIN{print log($(stack_size))/log(2)}')
 DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
+DEFINES += -DNUM_REDMULE_TILES=$(num_redmule_tiles)
+DEFINES += -DREDMULE_H=$(redmule_height)
+DEFINES += -DREDMULE_P=$(redmule_regs)
 ifdef terapool
 	DEFINES += -DNUM_SUB_GROUPS_PER_GROUP=$(num_sub_groups_per_group)
 	DEFINES += -DNUM_CORES_PER_SUB_GROUP=$(shell awk 'BEGIN{print ($(num_cores)/$(num_groups))/$(num_sub_groups_per_group)}')
@@ -115,7 +120,7 @@ endif
 RISCV_LLVM_TARGET  ?= --target=$(RISCV_TARGET) --sysroot=$(GCC_INSTALL_DIR)/$(RISCV_TARGET) --gcc-toolchain=$(GCC_INSTALL_DIR)
 
 RISCV_WARNINGS += -Wunused-variable -Wconversion -Wall -Wextra # -Werror
-RISCV_FLAGS_COMMON_TESTS ?= -march=$(RISCV_ARCH) -mabi=$(RISCV_ABI) -I$(ROOT_DIR) -I$(KERNELS_DIR) -I$(DATA_DIR) -static
+RISCV_FLAGS_COMMON_TESTS ?= -march=$(RISCV_ARCH) -mabi=$(RISCV_ABI) -I$(ROOT_DIR) -I$(REDMULE_DIR) -I$(KERNELS_DIR) -I$(DATA_DIR) -static
 RISCV_FLAGS_COMMON ?= $(RISCV_FLAGS_COMMON_TESTS) -g -std=gnu99 -O3  -fno-builtin-memcpy -fno-builtin-memset -ffast-math -fno-common -fno-builtin-printf $(DEFINES) $(RISCV_WARNINGS)
 RISCV_FLAGS_GCC    ?= -mcmodel=medany -Wa,-march=$(RISCV_ARCH_AS) -mtune=mempool -fno-tree-loop-distribute-patterns # -falign-loops=32 -falign-jumps=32
 RISCV_FLAGS_LLVM   ?= -mcmodel=small -mcpu=mempool-rv32 -mllvm -misched-topdown -menable-experimental-extensions

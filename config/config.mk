@@ -57,6 +57,13 @@ ro_line_width ?= 512
 # XQueue extension's queue size in each memory bank (in words)
 xqueue_size ?= 0
 
+#############################
+##  RedMulE configuration  ##
+#############################
+
+# Number of RedMulE tensor-engine tiles (0 = none; tensorpool overrides to 16)
+num_redmule_tiles ?= 0
+
 ################################
 ##  Optional functionalities  ##
 ################################

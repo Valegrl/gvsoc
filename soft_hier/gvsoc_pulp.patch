@@ -3943,6 +3943,19 @@ index b338039..d2356ae 100644
              "loc_base": loc_base,
              "loc_size": loc_size,
              "tcdm_width": tcdm_width,
+diff --git a/pulp/light_redmule/light_redmule.py b/pulp/light_redmule/light_redmule.py
+index 784ed37..fcf9868 100644
+--- a/pulp/light_redmule/light_redmule.py
++++ b/pulp/light_redmule/light_redmule.py
+@@ -36,7 +36,7 @@ class LightRedmule(gvsoc.systree.Component):
+ 
+         super().__init__(parent, name)
+ 
+-        self.add_sources(['pulp/light_redmule/light_redmule.cpp'])
++        self.add_sources(['pulp/light_redmule/light_redmule.cpp', 'cpu/iss/flexfloat/flexfloat.c'])
+ 
+         self.add_properties({
+             'tcdm_bank_width'   : tcdm_bank_width,
 diff --git a/pulp/mempool/bootrom.bin b/pulp/mempool/bootrom.bin
 old mode 100755
 new mode 100644
