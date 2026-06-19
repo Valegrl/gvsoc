@@ -93,6 +93,7 @@ class ClusterArch:
                         sync_itlv,
                         sync_special_mem,
                         soc_register_base,
+                        redmule_ic_latency=28,
                         bank_size=1024,
                         auto_fetch=False):
 
@@ -112,6 +113,7 @@ class ClusterArch:
         self.redmule_height             = redmule_height
         self.redmule_width              = redmule_width
         self.redmule_regs               = redmule_regs
+        self.redmule_ic_latency         = redmule_ic_latency
         self.nb_cores_per_tile          = nb_cores_per_tile
         self.nb_sub_groups_per_group    = nb_sub_groups_per_group
         self.nb_groups                  = nb_groups
@@ -141,7 +143,7 @@ class ClusterUnit(gvsoc.systree.Component):
         nb_axi_masters = arch.nb_axi_masters_per_group * arch.nb_groups
 
         # Tensor engines (RedMulE): build config only when engines are present
-        redmule_config = RedmuleParam(arch.redmule_height, arch.redmule_width, arch.redmule_regs) if arch.nb_redmule_tiles > 0 else None
+        redmule_config = RedmuleParam(arch.redmule_height, arch.redmule_width, arch.redmule_regs, ic_latency=arch.redmule_ic_latency) if arch.nb_redmule_tiles > 0 else None
 
         #Mempool cluster
         mempool_cluster=Cluster( self, 'mempool_cluster',

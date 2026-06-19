@@ -3943,11 +3943,64 @@ index b338039..d2356ae 100644
              "loc_base": loc_base,
              "loc_size": loc_size,
              "tcdm_width": tcdm_width,
+diff --git a/pulp/light_redmule/light_redmule.cpp b/pulp/light_redmule/light_redmule.cpp
+index 1d3e145..ff85d8d 100644
+--- a/pulp/light_redmule/light_redmule.cpp
++++ b/pulp/light_redmule/light_redmule.cpp
+@@ -152,6 +152,7 @@ public:
+     uint32_t            ce_width;
+     uint32_t            ce_pipe;
+     uint32_t            queue_depth;
++    uint32_t            ic_latency; // modeled interconnect round-trip (cycles)
+     uint32_t            bandwidth;
+     uint32_t            fold_tiles_mapping;
+     uint64_t            loc_base;
+@@ -245,6 +246,7 @@ LightRedmule::LightRedmule(vp::ComponentConf &config)
+     this->ce_width          = get_js_config()->get("ce_width")->get_int();
+     this->ce_pipe           = get_js_config()->get("ce_pipe")->get_int();
+     this->queue_depth       = get_js_config()->get("queue_depth")->get_int();
++    this->ic_latency        = get_js_config()->get("ic_latency")->get_int();
+     this->fold_tiles_mapping= get_js_config()->get("fold_tiles_mapping")->get_int();
+     this->loc_base          = get_js_config()->get("loc_base")->get_double();
+     this->compute_able      = 0;
+@@ -1088,7 +1090,7 @@ void LightRedmule::fsm_handler(vp::Block *__this, vp::ClockEvent *event)
+                 }
+ 
+                 //Counte on receiving cycle
+-                uint32_t receive_stamp = _this->tcdm_req->get_latency() + _this->fsm_timestamp;
++                uint32_t receive_stamp = ((_this->ic_latency > 0) ? _this->ic_latency : _this->tcdm_req->get_latency()) + _this->fsm_timestamp;
+ 
+                 //Push pending request queue
+                 _this->pending_req_queue.push(receive_stamp);
+@@ -1164,7 +1166,7 @@ void LightRedmule::fsm_handler(vp::Block *__this, vp::ClockEvent *event)
+                 }
+ 
+                 //Counte on receiving cycle
+-                uint32_t receive_stamp = _this->tcdm_req->get_latency() + _this->fsm_timestamp;
++                uint32_t receive_stamp = ((_this->ic_latency > 0) ? _this->ic_latency : _this->tcdm_req->get_latency()) + _this->fsm_timestamp;
+ 
+                 //Push pending request queue
+                 _this->pending_req_queue.push(receive_stamp);
+@@ -1258,7 +1260,7 @@ void LightRedmule::fsm_handler(vp::Block *__this, vp::ClockEvent *event)
+                 }
+ 
+                 //Counte on receiving cycle
+-                uint32_t receive_stamp = _this->tcdm_req->get_latency() + _this->fsm_timestamp;
++                uint32_t receive_stamp = ((_this->ic_latency > 0) ? _this->ic_latency : _this->tcdm_req->get_latency()) + _this->fsm_timestamp;
+ 
+                 //Push pending request queue
+                 _this->pending_req_queue.push(receive_stamp);
 diff --git a/pulp/light_redmule/light_redmule.py b/pulp/light_redmule/light_redmule.py
-index 784ed37..fcf9868 100644
+index 784ed37..799251d 100644
 --- a/pulp/light_redmule/light_redmule.py
 +++ b/pulp/light_redmule/light_redmule.py
-@@ -36,7 +36,7 @@ class LightRedmule(gvsoc.systree.Component):
+@@ -31,12 +31,13 @@ class LightRedmule(gvsoc.systree.Component):
+                 ce_width: int,
+                 ce_pipe: int,
+                 queue_depth: int=128,
++                ic_latency: int=0,    # modeled interconnect round-trip (cycles)
+                 fold_tiles_mapping: int=0,
+                 loc_base=0): #here we might add also local size to check that tcdm requests do not overflow...
  
          super().__init__(parent, name)
  
@@ -3956,6 +4009,27 @@ index 784ed37..fcf9868 100644
  
          self.add_properties({
              'tcdm_bank_width'   : tcdm_bank_width,
+@@ -49,10 +50,10 @@ class LightRedmule(gvsoc.systree.Component):
+             'ce_width'          : ce_height,
+             'ce_pipe'           : ce_pipe,
+             'queue_depth'       : queue_depth,
++            'ic_latency'       : ic_latency,
+             'fold_tiles_mapping': fold_tiles_mapping,
+             'loc_base'          : loc_base,
+         })
+-
+     def i_INPUT(self) -> gvsoc.systree.SlaveItf:
+         return gvsoc.systree.SlaveItf(self, 'input', signature='io')
+ 
+@@ -80,7 +81,7 @@ class LightRedmule(gvsoc.systree.Component):
+             Slave interface
+         """
+         self.itf_bind('offload_grant', itf, signature='wire<IssOffloadInsnGrant<uint32_t>*>')
+-
++    
+     def o_TCDM(self, itf: gvsoc.systree.SlaveItf):
+         self.itf_bind('tcdm', itf, signature='io')
+ 
 diff --git a/pulp/mempool/bootrom.bin b/pulp/mempool/bootrom.bin
 old mode 100755
 new mode 100644
@@ -4374,7 +4448,7 @@ index 2900efa..6801f84 100644
          #Sub Group local interconnect
          sub_group_local_interleaver = Interleaver(self, 'sub_group_local_interleaver', nb_slaves=nb_tiles_per_sub_group, nb_masters=nb_tiles_per_sub_group,
 diff --git a/pulp/mempool/mempool_system.py b/pulp/mempool/mempool_system.py
-index 91e50b9..ca1c280 100644
+index 91e50b9..168f282 100644
 --- a/pulp/mempool/mempool_system.py
 +++ b/pulp/mempool/mempool_system.py
 @@ -28,10 +28,11 @@ from elftools.elf.elffile import *
@@ -4386,11 +4460,11 @@ index 91e50b9..ca1c280 100644
  class System(st.Component):
  
 -    def __init__(self, parent, name, parser, terapool: bool=False, nb_cores_per_tile: int=4, nb_sub_groups_per_group: int=1, nb_groups: int=4, total_cores: int= 256, bank_factor: int=4, axi_data_width: int=64, nb_axi_masters_per_group: int=1, l2_size: int=0x1000000, nb_l2_banks: int=4):
-+    def __init__(self, parent, name, parser, async_l1_interco: bool=True, redmule_config: RedmuleParam=None, tensorpool: bool=False, terapool: bool=False, nb_redmule_tiles: int=0, nb_cores_per_tile: int=4, nb_sub_groups_per_group: int=1, nb_groups: int=4, total_cores: int= 256, bank_factor: int=4, axi_data_width: int=64, nb_axi_masters_per_group: int=1, l2_size: int=0x1000000, nb_l2_banks: int=4):
++    def __init__(self, parent, name, parser, async_l1_interco: bool=True, redmule_config: RedmuleParam=None, tensorpool: bool=False, terapool: bool=False, nb_redmule_tiles: int=0, nb_cores_per_tile: int=4, nb_sub_groups_per_group: int=1, nb_groups: int=4, total_cores: int= 256, bank_factor: int=4, bank_size: int=1024, axi_data_width: int=64, nb_axi_masters_per_group: int=1, l2_size: int=0x1000000, nb_l2_banks: int=4):
          super().__init__(parent, name)
  
          ################################################################
-@@ -46,14 +47,12 @@ class System(st.Component):
+@@ -46,15 +47,13 @@ class System(st.Component):
              binary = args.binary
  
          nb_axi_masters = nb_axi_masters_per_group * nb_groups
@@ -4402,10 +4476,12 @@ index 91e50b9..ca1c280 100644
 -
          #Mempool cluster
 -        mempool_cluster=Cluster(self, 'mempool_cluster', async_l1_interco=async_l1_interco, terapool=terapool, parser=parser, nb_cores_per_tile=nb_cores_per_tile,
+-                            nb_sub_groups_per_group=nb_sub_groups_per_group, nb_groups=nb_groups, total_cores=total_cores, bank_factor=bank_factor,
 +        mempool_cluster=Cluster(self, 'mempool_cluster', async_l1_interco=async_l1_interco, redmule_config=redmule_config, tensorpool=tensorpool, terapool=terapool, nb_redmule_tiles=nb_redmule_tiles, parser=parser, nb_cores_per_tile=nb_cores_per_tile,
-                             nb_sub_groups_per_group=nb_sub_groups_per_group, nb_groups=nb_groups, total_cores=total_cores, bank_factor=bank_factor,
++                            nb_sub_groups_per_group=nb_sub_groups_per_group, nb_groups=nb_groups, total_cores=total_cores, bank_factor=bank_factor, bank_size=bank_size,
                              axi_data_width=axi_data_width, nb_axi_masters_per_group=nb_axi_masters_per_group)
  
+         # Boot Rom
 @@ -65,7 +64,8 @@ class System(st.Component):
          l2_mem = L2_subsystem(self, 'l2_mem', nb_banks=nb_l2_banks, bank_width=axi_data_width, size=l2_size, nb_masters=nb_axi_masters, port_bandwidth=axi_data_width//4)
  
@@ -4428,17 +4504,17 @@ index 91e50b9..ca1c280 100644
 +        super(TensorpoolSystem, self).__init__(parent, name, options=options)
 +
 +        clock = Clock_domain(self, 'clock', frequency=500000000)
-+
-+        redmule_config = RedmuleParam(redmule_height = 8, redmule_width = 32, redmule_regs = 3)
++        
++        redmule_config = RedmuleParam(redmule_height = 8, redmule_width = 32, redmule_regs = 3, ic_latency = 28)
 +        #synchronous for now, since async has problems with the burst tcdm messaging system.
-+        soc = System(self, 'mempool_soc', parser, async_l1_interco=False, redmule_config=redmule_config, tensorpool=True, terapool=False, nb_redmule_tiles=16, nb_cores_per_tile=4, nb_sub_groups_per_group=4, nb_groups=4, total_cores=256, bank_factor=16, axi_data_width=64, nb_axi_masters_per_group=4, l2_size=0x400000, nb_l2_banks=4)
++        soc = System(self, 'mempool_soc', parser, async_l1_interco=False, redmule_config=redmule_config, tensorpool=True, terapool=False, nb_redmule_tiles=16, nb_cores_per_tile=4, nb_sub_groups_per_group=4, nb_groups=4, total_cores=256, bank_factor=8, bank_size=2048, axi_data_width=64, nb_axi_masters_per_group=4, l2_size=0x400000, nb_l2_banks=4)
 +
 +        self.bind(clock, 'out', soc, 'clock')
 diff --git a/pulp/mempool/mempool_tile.py b/pulp/mempool/mempool_tile.py
-index 42bac60..83c02f6 100644
+index 42bac60..7337c0c 100644
 --- a/pulp/mempool/mempool_tile.py
 +++ b/pulp/mempool/mempool_tile.py
-@@ -25,19 +25,41 @@ import gvsoc.systree as st
+@@ -25,19 +25,42 @@ import gvsoc.systree as st
  from pulp.snitch.sequencer import Sequencer
  from pulp.mempool.l1_interconnect.l1_address_scrambler import L1_AddressScrambler
  
@@ -4460,12 +4536,13 @@ index 42bac60..83c02f6 100644
 +            #NOT FINISHED YET WITH PARAMETERISZING THESE
 +            redmule = LightRedmule(self, f'tile-{tile_id}-redmule',
 +                                    tcdm_bank_width     = 4,
-+                                    tcdm_bank_number    = 1024,
++                                    tcdm_bank_number    = (redmule_config.redmule_height * (redmule_config.redmule_regs + 1) )// 2 ,
 +                                    elem_size           = 2,
 +                                    ce_height           = redmule_config.redmule_height,
 +                                    ce_width            = redmule_config.redmule_width,
 +                                    ce_pipe             = redmule_config.redmule_regs,
-+                                    queue_depth         = 64
++                                    queue_depth         = 16,
++                                    ic_latency          = redmule_config.ic_latency
 +                                    )
 +
          [args, __] = parser.parse_known_args()
@@ -4482,7 +4559,7 @@ index 42bac60..83c02f6 100644
          # Hardware parameters
          nb_remote_group_ports = nb_groups - 1
          nb_remote_sub_group_ports = nb_sub_groups_per_group - 1
-@@ -45,7 +67,7 @@ class Tile(st.Component):
+@@ -45,7 +68,7 @@ class Tile(st.Component):
          # global_tile_id = tile_id + group_id * nb_tiles_per_group
          Xfrep = 0
          # stack_size_per_tile = 0x800
@@ -4491,7 +4568,7 @@ index 42bac60..83c02f6 100644
  
          # Snitch core complex
          self.int_cores = []
-@@ -112,9 +134,17 @@ class Tile(st.Component):
+@@ -112,9 +135,17 @@ class Tile(st.Component):
  
          # ICO --> L1 TCDM
          for i in range(0, nb_cores_per_tile):
@@ -4510,7 +4587,7 @@ index 42bac60..83c02f6 100644
          # L1 TCDM --> Remote TCDM interfaces
          self.bind(self, 'loc_remt_slave_in', l1, 'remote_local_in0')
          self.bind(l1, 'remote_local_out0', self, 'loc_remt_master_out')
-@@ -148,10 +178,22 @@ class Tile(st.Component):
+@@ -148,10 +179,22 @@ class Tile(st.Component):
          # AXI -> Remote AXI port
          self.bind(axi_ico, 'output', self, 'axi_out')
  
@@ -4537,19 +4614,21 @@ index 42bac60..83c02f6 100644
              # Icache
 diff --git a/pulp/mempool/redmule_configurations.py b/pulp/mempool/redmule_configurations.py
 new file mode 100644
-index 0000000..e78e92c
+index 0000000..5dbcc57
 --- /dev/null
 +++ b/pulp/mempool/redmule_configurations.py
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,11 @@
 +import gvsoc.systree as st
 +
 +class RedmuleParam:
-+    def __init__(self, redmule_height, redmule_width, redmule_regs):
++    def __init__(self, redmule_height, redmule_width, redmule_regs,
++                 queue_depth=16, ic_latency=28):
 +        #if redmule enabled (nb_redmule_tiles>0), these first 3 need to configured, otherwise NULL objects will be derefenced
 +        self.redmule_height = redmule_height
 +        self.redmule_width = redmule_width
 +        self.redmule_regs = redmule_regs
-+        #self.rob_depth = rob_depth #not used currently
++        #   ic_latency -> modeled interconnect round-trip (cycles); calibration knob
++        self.ic_latency = ic_latency
 \ No newline at end of file
 diff --git a/tensorpool.py b/tensorpool.py
 new file mode 100644

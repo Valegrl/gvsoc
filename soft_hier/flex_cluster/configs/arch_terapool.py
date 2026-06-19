@@ -55,6 +55,7 @@ class FlexClusterArch:
         self.redmule_height              = 0
         self.redmule_width               = 0
         self.redmule_regs                = 0
+        self.redmule_ic_latency          = 0
 
         #HBM
         self.hbm_start_base          = 0xc0000000
