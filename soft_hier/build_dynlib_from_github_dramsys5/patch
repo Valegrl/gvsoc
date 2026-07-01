@@ -750,7 +750,7 @@ index 0000000..bc541a2
 +        resourceDirectory = resources_path;
 +    }
 +
-+    std::filesystem::path baseConfig = resourceDirectory / "hbm2-example.json";
++    std::filesystem::path baseConfig = resourceDirectory / "lpddr4-example.json";
 +    if (simulationJson_path != 0 && std::filesystem::exists(simulationJson_path))
 +    {
 +        baseConfig = simulationJson_path;

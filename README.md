@@ -4,6 +4,7 @@
 
 **This is the tmp branch only for dev purpose.*
 *
+
 ## SoftHier Architecture Overview 🏗️
 
 ![SoftHier Architecture Diagram](docs/figures/SoftHier_Arch.png)
@@ -26,7 +27,7 @@ GVSoC requires the following tools and versions:
 - **cmake** version >= 3.18.1
 - **Python** version >= 3.11.3
 
-Please ensure your toolchain meets these requirements. 
+Please ensure your toolchain meets these requirements.
 
 Also please make sure you are using the bash shell for SoftHier Simulation:
 
@@ -35,6 +36,12 @@ bash
 ```
 
 ## Getting Started with SoftHier Simulation 🚀
+
+> [!WARNING]
+> **This repository builds the hardware/simulator only and runs pre-built binaries.**
+> It does **not** build application software. Build your application binaries in the external
+> MemPool repository — **https://github.com/Valegrl/mempool** (branch `main`) — and then run
+> them here with `bin=<path/to/your.elf> make run`.
 
 ### Clone the Repository and Set Up the Environment 🏁
 
@@ -46,29 +53,29 @@ Follow these steps to set up the SoftHier simulation environment:
    git clone https://github.com/Valegrl/gvsoc.git -b soft_hier_mempool soft_hier_mempool
    cd soft_hier_mempool
    ```
-
 2. **Initialize the simulator environment** by running:
 
    ```bash
    source sourceme.sh
    ```
 
-### Build and Run the SoftHier Simulation Model 🧱
+### Build the SoftHier Hardware Model 🧱🛠️
 
-**Build the SoftHier hardware model**: 🛠️
+**Build the SoftHier hardware model**:
 
-   ```bash
+```bash
    make hw
-   ```
+```
+
 The default configuration file is located at `soft_hier/flex_cluster/flex_cluster_arch.py` and builds the **Mempool** preset (256 cores/cluster). To use a custom architecture configuration, specify the file path as follows:
 
-   ```bash
+```bash
    cfg=<path/to/your/architecture/configuration/file> make hw
-   ```
+```
 
    Four ready-made Mempool-family presets ship in `soft_hier/flex_cluster/configs/`:
 
-   ```bash
+```bash
    # Minpool (16 cores/cluster)
    cfg=soft_hier/flex_cluster/configs/arch_minpool.py  make hw
 
@@ -80,114 +87,65 @@ The default configuration file is located at `soft_hier/flex_cluster/flex_cluste
 
    # Tensorpool (256 cores/cluster + 16 RedMulE tensor engines, sub-groups, 4 MB L1)
    cfg=soft_hier/flex_cluster/configs/arch_tensorpool.py make hw
-   ```
-
-   The same `cfg=` switch works with the `hs` target below; the Makefile auto-derives the matching Mempool SW `config=` (minpool/mempool/terapool/tensorpool) from the `cfg=` filename, so `-DNUM_CORES` etc. are forwarded to the CMake SW build automatically. When swapping presets after an earlier build, also rebuild the software (`make sw` / `make hs`) so the binary's sizes match the newly configured HW -- otherwise the linker may reuse stale `arch.ld` values from the previous preset.
-
-
-### Build the Default Binary 💾
-To build the default binary (default Mempool) from the source code in `soft_hier/flex_cluster_sdk/app_example`, run:
-   ```bash
-   make sw
-   # Presets:
-   # make config=mempool sw
-   # make config=minpool sw
-   # make config=terapool sw
-   # make config=tensorpool sw
-   ```
-The generated binary `sw_build/softhier.elf` and the dump file `sw_build/softhier.dump` will be located in the `sw_build` directory.
-
-> [!WARNING]
-> **Tensorpool RedMulE software:** to build SW for the `tensorpool` preset with full RedMulE
-> compatibility, use the upstream MemPool RedMulE repository
-> (https://github.com/Valegrl/mempool, branch `main`) — not this repo.
-> This repository ships only the lightweight `light_redmule` GVSoC model and a minimal
-> `mempool_redmule_*` driver (`runtime/mempool/runtime.h`); the full RedMulE software stack
-> (HAL, kernels, golden data) and its build dependencies live there.
-
-### Build a Custom Binary ✏️
-To build your own binary:
-
-1. Prepare your source code in a folder with a `CMakeLists.txt` that defines the source files and include paths. For example:
-   ```cmake
-   # CMakeLists.txt example
-   set(SRC_SOURCES
-       ${CMAKE_CURRENT_SOURCE_DIR}/main.c
-   )
-   
-   set(SOURCES ${SRC_SOURCES} PARENT_SCOPE)
-   set(INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include PARENT_SCOPE)
-   ```
-
-2. Run the following command, replacing `<folder/of/your/code>` with the path to your source code folder:
-   ```bash
-   app=<folder/of/your/code> make sw
-   ```
-
-This will compile the binary using the specified folder. The generated binary `sw_build/softhier.elf` and the dump file `sw_build/softhier.dump` will be located in the `sw_build` directory.
-
-3. **Run the simulation** with an example binary: 🎮
-
-   ```bash
-   ./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary examples/SoftHier/binary/example.elf run --trace=/chip/cluster_0 --preload=my_preload.elf
-   ```
-
-   - `--binary`: Specifies the executable binary to be loaded for the SoftHier simulation.
-   - `--trace`: Indicates which component's trace logs should be generated during the simulation.
-   - `--preload`: Loads an additional ELF file into memory before execution (e.g., pre-initialized HBM/DRAM data).
-
-   Or run sw_build/softhier.elf through Makefile:
-
-   ```bash
-   pld=my_preload.elf make run 
-   ```
-
-   - `pld` is equivalent to `--preload` when executing directly.
-
-   **Generating HBM Preload Data**
-   To generate an HBM preload binary from NumPy data, run:
-   ```bash
-   python soft_hier/flex_cluster_sdk/tests/05_HBM_accesses/preload/gen_preload1.py
-   ```
-   This will create the preload binary at:
-   ```
-   soft_hier/flex_cluster_sdk/tests/05_HBM_accesses/preload/my_preload.py
-   ```
-
-
-### Build Customized Hardware and Software (Highly Recommended) 🧩
-
-For convenient and flexible development, use the `hs` Makefile target to build both hardware and software together. This is particularly useful for custom architecture configurations and software development. Run:
-
-```bash
-cfg=<path/to/your/architecture/configuration/file> app=<folder/of/your/code> make hs
 ```
 
-We provide example architecture configurations and software source code in the repository. Try the following:
+> [!IMPORTANT]
+> The architecture you build here (cluster count, cores, L1 sizes, ...) must match the
+> configuration the binary was compiled against in the external MemPool repo. A mismatch
+> (e.g. a 4×4 binary on a 2×2 model) shows up at runtime as out-of-bound accesses to the
+> `debug_mem` sink. Rebuild the binary in the MemPool repo whenever you change the `cfg=` preset here.
 
-#### Example 1: Hello World 🌍
+## Run a Binary on the Simulator 🎮
+
+Point `bin=` at an ELF built in the external MemPool repository and run it on the SoftHier
+model you built above:
+
 ```bash
-cfg=soft_hier/flex_cluster/configs/arch_minpool.py app=soft_hier/flex_cluster_sdk/app_example make hs; make run_only
+bin=<path/to/your.elf> make run
 ```
 
-#### Example 2: TCDM accesses
+`make run` executes the simulator with the detailed debug traces and writes the log to
+`traces/run_trace.txt`. For a clean run without the extra traces, use `run_only`:
+
 ```bash
-cfg=soft_hier/flex_cluster/configs/arch_minpool.py app=soft_hier/flex_cluster_sdk/tests/06_TCDM_accesses make hs
-pld=soft_hier/flex_cluster_sdk/tests/05_HBM_accesses/preload/my_preload.elf make run_only
+bin=<path/to/your.elf> make run_only
+```
+
+You can also invoke the simulator directly:
+
+```bash
+./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster \
+    --binary <path/to/your.elf> run --trace=/chip/cluster_0 --preload=my_preload.elf
+```
+
+- `--binary` (`bin=`): the pre-built ELF to load and execute.
+- `--trace`: which component's trace logs to emit during the simulation.
+- `--preload` (`pld=`): an additional ELF loaded into memory before execution (e.g. pre-initialized HBM/DRAM data):
+
+```bash
+pld=my_preload.elf bin=<path/to/your.elf> make run
+```
+
+**Generating HBM preload data.** To build an HBM preload binary from NumPy data, use the
+preload helper shipped in this repo (or generate it in the external MemPool repo):
+
+```bash
+python soft_hier/flex_cluster_utilities/preload.py
 ```
 
 ## SoftHier Visualization 📈
 
 To visualize a SoftHier simulation, follow these steps:
-1. Run with the `runv` Makefile target.
-2. Generate a Perfetto-format trace file using the `pfto` target.
-An integrated example
+
+1. Run with the `runv` Makefile target to produce an analysis trace.
+2. Convert it to a Perfetto-format trace with the `pfto` target.
+
 ```bash
-<args> make hs runv pfto
+bin=<path/to/your.elf> make runv pfto
 ```
 
-The trace file will be saved at:  
-📂 `sw_build/perfetto.json`
+The trace file will be saved at:
+📂 `traces/perfetto.json`
 
-To view the trace, open the following URL in your browser:  
+To view the trace, open the following URL in your browser:
 👉 [Perfetto UI](https://ui.perfetto.dev/)

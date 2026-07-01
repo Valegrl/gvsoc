@@ -194,23 +194,10 @@ ifdef cfg
 	config_file = "$(cfg)"
 endif
 
-# Auto-derive the Mempool SW config (minpool|mempool|terapool|tensorpool) from cfg= when
-# it matches the preset naming convention soft_hier/flex_cluster/configs/arch_<name>.py.
-# Explicit config=<name> from the command line always wins.
-ifdef cfg
-ifndef config
-cfg_preset := $(patsubst arch_%.py,%,$(notdir $(cfg)))
-ifneq ($(filter $(cfg_preset),minpool mempool terapool tensorpool),)
-config := $(cfg_preset)
-endif
-endif
-endif
-
 config:
 	rm -rf pulp/pulp/chips/flex_cluster
 	cp -rf soft_hier/flex_cluster pulp/pulp/chips/flex_cluster
 	cp $(config_file) pulp/pulp/chips/flex_cluster/flex_cluster_arch.py
-	python3 soft_hier/flex_cluster_utilities/config.py $(config_file)
 
 hw:
 	make config
@@ -222,58 +209,6 @@ hw-deeploy:
 	make TARGETS=pulp.chips.flex_cluster.flex_cluster all-deeploy
 
 ######################################################################
-## 				Make Targets for SoftHier Software	 				##
-######################################################################
-
-sw_cmake_arg ?= ""
-ifdef app
-	app_path = $(abspath $(app))
-	sw_cmake_arg = "-DSRC_DIR=$(app_path)"
-endif
-
-arch_cmake_arg := $(shell if grep "spatz_attaced_core_list" $(config_file) | grep "\[\]" > /dev/null 2>&1; then echo "-DRISCV_ARCH=rv32imafd_zfh"; else echo "-DRISCV_ARCH=rv32imafdv_zfh"; fi)
-
-######################################################################
-## 				Mempool Config Integration							##
-######################################################################
-
-MEMPOOL_CMAKE_ARGS ?=
-ifdef config
-  MEMPOOL_DIR := $(CURDIR)
-  include $(CURDIR)/config/config.mk
-  MEMPOOL_CMAKE_ARGS := \
-    -DNUM_CORES=$(num_cores) \
-    -DNUM_GROUPS=$(num_groups) \
-    -DNUM_CORES_PER_TILE=$(num_cores_per_tile) \
-    -DBANKING_FACTOR=$(banking_factor) \
-    -DL1_BANK_SIZE=$(l1_bank_size) \
-    -DL2_BASE=$(l2_base) \
-    -DL2_SIZE=$(l2_size) \
-    -DSEQ_MEM_SIZE=$(seq_mem_size) \
-    -DSTACK_SIZE=$(stack_size) \
-    -DXQUEUE_SIZE=$(xqueue_size) \
-    -DBOOT_ADDR=$(boot_addr) \
-    -DNUM_REDMULE_TILES=$(num_redmule_tiles)
-endif
-
-sw:
-	rm -rf sw_build && mkdir sw_build
-	cd sw_build && $(CMAKE) $(sw_cmake_arg) $(arch_cmake_arg) $(MEMPOOL_CMAKE_ARGS) ../soft_hier/flex_cluster_sdk/ && make
-	@! grep -q "ebreak" sw_build/softhier.dump || (echo "Error: 'ebreak' found in sw_build/softhier.dump" && exit 1)
-
-clean_sw:
-	rm -rf sw_build
-
-######################################################################
-## 				Make Targets for SoftHier HW + SW	 				##
-######################################################################
-
-hs:
-	make config
-	make TARGETS=pulp.chips.flex_cluster.flex_cluster all
-	make sw
-
-######################################################################
 ## 				Make Targets for Run Simulator		 				##
 ######################################################################
 
@@ -282,8 +217,17 @@ ifdef pld
 	pld_path = $(abspath $(pld))
 	preload_arg = --preload $(pld_path)
 endif
-run:
-	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) \
+
+bin ?=
+trace_dir ?= traces
+
+.PHONY: check-bin
+check-bin:
+	@test -n "$(bin)" || { echo "ERROR: set bin=<path/to/app.elf>, e.g. 'bin=path/to/app.elf make run'"; exit 1; }
+	@mkdir -p $(trace_dir)
+
+run: check-bin
+	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary $(bin) run $(preload_arg) \
 	--trace-level=debug \
 	--trace=/chip/cluster_0/dma \
 	--trace-level=trace \
@@ -295,49 +239,50 @@ run:
 	--trace=/chip/cluster_0/mempool_cluster/dma_tcdm_interleaver \
 	--trace=/chip/cluster_0/mempool_cluster/dma_axi_interleaver \
 	--trace=/chip/cluster_0/mempool_cluster/group_3/tile_0/addr_scrambler3 \
-	| tee sw_build/run_trace.txt
+	| tee $(trace_dir)/run_trace.txt
 
-run_only:
-	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) | tee sw_build/run_trace.txt
+run_only: check-bin
+	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary $(bin) run $(preload_arg) | tee $(trace_dir)/run_trace.txt
 
-runv:
-	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) --trace=redmule --trace=idma --trace=spatz --trace=cluster_registers | tee sw_build/analyze_trace.txt
+runv: check-bin
+	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary $(bin) run $(preload_arg) --trace=redmule --trace=idma --trace=spatz --trace=cluster_registers | tee $(trace_dir)/analyze_trace.txt
 
-runv_simple:
-	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) --trace=redmule --trace=idma --trace=cluster_registers | tee sw_build/analyze_trace.txt
+runv_simple: check-bin
+	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary $(bin) run $(preload_arg) --trace=redmule --trace=idma --trace=cluster_registers | tee $(trace_dir)/analyze_trace.txt
 
-rund:
-	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary sw_build/softhier.elf run $(preload_arg) --trace-level=6 --trace=/chip/cluster_4/pe0/insn
+rund: check-bin
+	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster --binary $(bin) run $(preload_arg) --trace-level=6 --trace=/chip/cluster_4/pe0/insn
 
-run_spatz:
+run_spatz: check-bin
 	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster \
-		--binary sw_build/softhier.elf run $(preload_arg) \
+		--binary $(bin) run $(preload_arg) \
 		--trace=/chip/cluster_0/pe0/insn \
 		--trace=spatz \
-		| tee sw_build/analyze_trace.txt; \
+		| tee $(trace_dir)/analyze_trace.txt; \
 	if [ -n "$(trace_name)" ]; then \
-		cp sw_build/analyze_trace.txt ./$(trace_name)_trace.txt; \
+		cp $(trace_dir)/analyze_trace.txt ./$(trace_name)_trace.txt; \
 		echo "Copied trace to ./$(trace_name)_trace.txt"; \
 	else \
-		echo "No trace_name specified. File kept as sw_build/analyze_trace.txt"; \
+		echo "No trace_name specified. File kept as $(trace_dir)/analyze_trace.txt"; \
 	fi
 
 ######################################################################
 ## 				Make Targets for Trace Analyzer		 				##
 ######################################################################
 
-trace_file ?= sw_build/analyze_trace.txt
+trace_file ?= $(trace_dir)/analyze_trace.txt
 ifdef trace
 	trace_file = $(trace)
 endif
 pfto:
-	python soft_hier/flex_cluster_utilities/trace_perfetto/parse.py $(trace_file) sw_build/roi.json
-	python soft_hier/flex_cluster_utilities/trace_perfetto/visualize.py sw_build/roi.json -o sw_build/perfetto.json
+	@mkdir -p $(trace_dir)
+	python soft_hier/flex_cluster_utilities/trace_perfetto/parse.py $(trace_file) $(trace_dir)/roi.json
+	python soft_hier/flex_cluster_utilities/trace_perfetto/visualize.py $(trace_dir)/roi.json -o $(trace_dir)/perfetto.json
 
 
-pfto_spatz:
+pfto_spatz: check-bin
 	./install/bin/gvsoc --target=pulp.chips.flex_cluster.flex_cluster \
-		--binary sw_build/softhier.elf run $(preload_arg) \
+		--binary $(bin) run $(preload_arg) \
 		--trace-level=trace \
 		--trace="/chip/cluster_0/*" \
 		| tee $(trace_file); \
@@ -346,8 +291,8 @@ pfto_spatz:
 	else \
 		out_name=perfetto; \
 	fi; \
-	python soft_hier/flex_cluster_utilities/trace_perfetto/parse.py $(trace_file) sw_build/roi.json; \
-	python soft_hier/flex_cluster_utilities/trace_perfetto/visualize.py sw_build/roi.json -o ./$$out_name.json; \
+	python soft_hier/flex_cluster_utilities/trace_perfetto/parse.py $(trace_file) $(trace_dir)/roi.json; \
+	python soft_hier/flex_cluster_utilities/trace_perfetto/visualize.py $(trace_dir)/roi.json -o ./$$out_name.json; \
 	echo "Generated ./$$out_name.json"
 
 clean_trace:

@@ -22,3 +22,8 @@ tests/snitch/
 tests/spatz-rtl/
 tests/magia-sdk/
 tests/riscv-tests/
+core/
+gvrun/
+gvtest/
+pulp/pulpos/
+pyenv_softhier/
