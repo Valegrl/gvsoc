@@ -40,7 +40,7 @@ bash
 > [!WARNING]
 > **This repository builds the hardware/simulator only and runs pre-built binaries.**
 > It does **not** build application software. Build your application binaries in the external
-> MemPool repository — **https://github.com/Valegrl/mempool** (branch `main`) — and then run
+> MemPool repository — **https://github.com/Valegrl/mempool** (branch `Valegrl/neural_rx`) — and then run
 > them here with `bin=<path/to/your.elf> make run`.
 
 ### Clone the Repository and Set Up the Environment 🏁
