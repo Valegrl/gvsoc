@@ -93,7 +93,10 @@ class ClusterArch:
                         sync_itlv,
                         sync_special_mem,
                         soc_register_base,
-                        redmule_ic_latency=28,
+                        redmule_queue_depth=0,
+                        redmule_stream_loads=False,
+                        redmule_row_refill_cyc=0,
+                        redmule_tcdm_bank_number=None,
                         bank_size=1024,
                         auto_fetch=False):
 
@@ -113,7 +116,10 @@ class ClusterArch:
         self.redmule_height             = redmule_height
         self.redmule_width              = redmule_width
         self.redmule_regs               = redmule_regs
-        self.redmule_ic_latency         = redmule_ic_latency
+        self.redmule_queue_depth        = redmule_queue_depth
+        self.redmule_stream_loads       = redmule_stream_loads
+        self.redmule_row_refill_cyc     = redmule_row_refill_cyc
+        self.redmule_tcdm_bank_number   = redmule_tcdm_bank_number
         self.nb_cores_per_tile          = nb_cores_per_tile
         self.nb_sub_groups_per_group    = nb_sub_groups_per_group
         self.nb_groups                  = nb_groups
@@ -143,7 +149,15 @@ class ClusterUnit(gvsoc.systree.Component):
         nb_axi_masters = arch.nb_axi_masters_per_group * arch.nb_groups
 
         # Tensor engines (RedMulE): build config only when engines are present
-        redmule_config = RedmuleParam(arch.redmule_height, arch.redmule_width, arch.redmule_regs, ic_latency=arch.redmule_ic_latency) if arch.nb_redmule_tiles > 0 else None
+        redmule_config = RedmuleParam(
+            tcdm_bank_number=arch.redmule_tcdm_bank_number,
+            redmule_height=arch.redmule_height,
+            redmule_width=arch.redmule_width,
+            redmule_regs=arch.redmule_regs,
+            queue_depth=arch.redmule_queue_depth,
+            stream_loads=arch.redmule_stream_loads,
+            row_refill_cyc=arch.redmule_row_refill_cyc,
+        ) if arch.nb_redmule_tiles > 0 else None
 
         #Mempool cluster
         mempool_cluster=Cluster( self, 'mempool_cluster',

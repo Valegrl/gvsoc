@@ -58,7 +58,10 @@ class FlexClusterArch:
         self.redmule_height              = 8
         self.redmule_width               = 32
         self.redmule_regs                = 3
-        self.redmule_ic_latency          = 28
+        self.redmule_queue_depth         = 128
+        self.redmule_stream_loads        = True
+        self.redmule_row_refill_cyc      = 740
+        self.redmule_tcdm_bank_number    = None   # auto-derive: (height*(regs+1))//2
 
         #HBM
         self.hbm_start_base          = 0xc0000000
