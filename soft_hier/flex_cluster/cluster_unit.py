@@ -202,7 +202,7 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # DMA
         dma = FlexMemPoolDma(self, 'dma', loc_base=arch.base, loc_size=arch.tcdm_size + data_dumpper_input_size, tcdm_width=arch.axi_data_width,
-                             tcdm_outstanding=getattr(arch, 'dma_tcdm_outstanding', 1))
+                             tcdm_outstanding=arch.dma_tcdm_outstanding)
 
         # Binary Loader
         loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary, entry=arch.insn_area.base)
