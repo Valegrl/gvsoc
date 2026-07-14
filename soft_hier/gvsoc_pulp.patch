@@ -2802,823 +2802,327 @@ index 95562da..b369dd2 100644
 +    void collective_analyze(vp::IoReq * req, std::queue<int> * queue, int router_x, int router_y);
 +    void collective_generate(vp::IoReq * req, std::queue<int> * queue, int router_x, int router_y);
  };
-diff --git a/pulp/idma/be/idma_be.cpp b/pulp/idma/be/idma_be.cpp
-index 6936f4b..b82eab5 100644
---- a/pulp/idma/be/idma_be.cpp
-+++ b/pulp/idma/be/idma_be.cpp
-@@ -27,7 +27,8 @@ IDmaBe::IDmaBe(vp::Component *idma, IdmaTransferProducer *me,
-     IdmaBeConsumer *loc_be_read, IdmaBeConsumer *loc_be_write,
-     IdmaBeConsumer *ext_be_read, IdmaBeConsumer *ext_be_write)
- :   Block(idma, "be"),
--    fsm_event(this, &IDmaBe::fsm_handler)
-+    fsm_event(this, &IDmaBe::fsm_handler),
-+    transfer_regulation_event(this, &IDmaBe::transfer_regulation_handler)
- {
-     // Middle-end and backend protocols will be used later for interaction
-     this->me = me;
-@@ -55,37 +56,84 @@ IdmaBeConsumer *IDmaBe::get_be_consumer(uint64_t base, uint64_t size, bool is_re
- }
- 
- 
--// This is called by middle to push a new transfer. This can called only once no transfer is active
--// but before they are fully handled by backend protocols so that transfer can be fully pipelined.
-+// This is called by middle to push a new transfer. This is called only when the backend has
-+// no active transfer
- void IDmaBe::enqueue_transfer(IdmaTransfer *transfer)
- {
--    this->trace.msg(vp::Trace::LEVEL_TRACE, "Queueing burst (burst: %p, src: 0x%x, dst: 0x%x, size: 0x%x)\n",
--        transfer, transfer->src, transfer->dst, transfer->size);
--
--    // Remember the transfer as it has to be provided when burst are sent to backend protocols
--    this->current_transfer = transfer;
--
--    // Extract information abouth the transfer. This will be used to split it into smaller bursts
--    this->current_transfer_size = transfer->size;
--    transfer->ack_size = transfer->size;
--    this->current_transfer_src = transfer->src;
--    this->current_transfer_dst = transfer->dst;
--    this->current_transfer_src_be = this->get_be_consumer(transfer->src, transfer->size, true);
--    this->current_transfer_dst_be = this->get_be_consumer(transfer->dst, transfer->size, false);
--
--    // Trigger FSM
--    this->fsm_event.enqueue();
-+    this->trace.msg(vp::Trace::LEVEL_TRACE, "Queueing burst (burst: %p, src: 0x%llx, dst: 0x%llx, size: 0x%x) | regulation_queue depth = %d\n",
-+        transfer, transfer->src, transfer->dst, transfer->size,  this->regulation_queue.size());
-+
-+    this->regulation_queue.push(transfer);
-+    this->transfer_regulation_event.enqueue();
-+}
-+
-+void IDmaBe::transfer_regulation_handler(vp::Block *__this, vp::ClockEvent *event)
-+{
-+    IDmaBe *_this = (IDmaBe *)__this;
-+
-+    _this->trace.msg(vp::Trace::LEVEL_TRACE, "[transfer_regulation_handler] invoke\n");
-+
-+    if (!_this->regulation_queue.empty())
-+    {
-+        IdmaTransfer *wait_txn = _this->regulation_queue.front();
-+        IdmaBeConsumer *wait_txn_src_be = _this->get_be_consumer(wait_txn->src, wait_txn->size, true);
-+
-+        if (!_this->transfer_ack_queue.empty() && (_this->current_transfer_src_be != wait_txn_src_be))
-+        {
-+            _this->trace.msg(vp::Trace::LEVEL_TRACE, "[transfer_regulation_handler] Src Conflict\n");
-+            return;
-+        }
-+
-+         _this->trace.msg(vp::Trace::LEVEL_TRACE, "[transfer_regulation_handler] Forward Transfer\n");
-+
-+        // Push the transfer into the queue, we will need it later when the bursts are coming back
-+        // from memory. We will remove it from the queue when the transfer is fully done
-+        IdmaTransfer *transfer = wait_txn;
-+        _this->regulation_queue.pop();
-+        _this->transfer_queue.push(transfer);
-+        _this->transfer_ack_queue.push(transfer);
-+
-+        // Extract information abouth the transfer
-+        _this->current_transfer = transfer;
-+        _this->current_transfer_size = transfer->size;
-+        transfer->ack_size = transfer->size;
-+        _this->current_transfer_src = transfer->src;
-+        _this->current_transfer_dst = transfer->dst;
-+        _this->current_transfer_src_be = _this->get_be_consumer(transfer->src, transfer->size, true);
-+        _this->current_transfer_dst_be = _this->get_be_consumer(transfer->dst, transfer->size, false);
-+
-+        _this->fsm_event.enqueue();
-+
-+        if (!_this->regulation_queue.empty())
-+        {
-+            _this->transfer_regulation_event.enqueue();
-+        }
-+    }
- }
- 
- 
- bool IDmaBe::can_accept_transfer()
- {
--    // Only accept a new transfer if no transfer is being processed. Note that the back-end can
--    // start a new transfer as soon as it has been fully forwarded to source and destination
--    // back-ends.
-+    // Only accept a new transfer if no transfer is on-going.
-     return this->current_transfer_size == 0;
- }
- 
-+#ifdef ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+uint64_t IDmaBe::get_collective_type()
-+{
-+    return this->current_transfer->parent->collective_type;
-+}
-+
-+uint16_t IDmaBe::get_collective_row_mask()
-+{
-+    return this->current_transfer->parent->collective_row_mask;
-+}
-+
-+uint16_t IDmaBe::get_collective_col_mask()
-+{
-+    return this->current_transfer->parent->collective_col_mask;
-+}
-+#endif //ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
- 
- 
- void IDmaBe::fsm_handler(vp::Block *__this, vp::ClockEvent *event)
-@@ -117,10 +165,10 @@ void IDmaBe::fsm_handler(vp::Block *__this, vp::ClockEvent *event)
- 
-         // Enqueue the read burst. This will make the source backend start sending read requests
-         // to the memory
--        _this->current_transfer_src_be->read_burst(_this->current_transfer, src, burst_size);
-+        _this->current_transfer_src_be->read_burst(src, burst_size);
-         // Also enqueue the write burst which will be used only when the source is pushing data,
-         // to know where to write it
--        _this->current_transfer_dst_be->write_burst(_this->current_transfer, dst, burst_size);
-+        _this->current_transfer_dst_be->write_burst(dst, burst_size);
- 
-         // Updated current transfer by removing the burst we just processed
-         _this->current_transfer_size -= burst_size;
-@@ -143,23 +191,26 @@ void IDmaBe::fsm_handler(vp::Block *__this, vp::ClockEvent *event)
- void IDmaBe::update()
- {
-     // Check if any action should be taken in the next cycle from the FSM handler
--    this->fsm_event.enqueue();
-+    this->transfer_regulation_event.enqueue();
- }
- 
- 
- 
- // Called by source backend protocol to know if it can send data to be written
--bool IDmaBe::is_ready_to_accept_data(IdmaTransfer *transfer)
-+bool IDmaBe::is_ready_to_accept_data()
- {
-     // Check if the destination backend of the first transfer is ready to accept them
-+    IdmaTransfer *transfer = this->transfer_queue.front();
-     IdmaBeConsumer *dst_be = this->get_be_consumer(transfer->dst, transfer->size, false);
-     return dst_be->can_accept_data();
- }
- 
- 
- // This is called by the source backend protocol to push a data chunk to the destination
--void IDmaBe::write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size)
-+void IDmaBe::write_data(uint8_t *data, uint64_t size)
- {
-+    // Get back the first transfer from the queue to know where to send the data
-+    IdmaTransfer *transfer = this->transfer_queue.front();
-     // Get destination backend
-     IdmaBeConsumer *dst_be = this->get_be_consumer(transfer->dst, transfer->size, false);
- 
-@@ -167,18 +218,24 @@ void IDmaBe::write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size)
-     transfer->dst += size;
-     transfer->size -= size;
- 
-+    if (transfer->size == 0)
-+    {
-+        this->transfer_queue.pop();
-+    }
-+
-     // And forward data.
-     // Note that the source backend already checked that the destination was ready by calling
-     // our is_ready_to_accept_data method
--    dst_be->write_data(transfer, data, size);
-+    dst_be->write_data(data, size);
- }
- 
- 
- 
- // This is called by the destination backend protocol to acknowledged written data
--void IDmaBe::ack_data(IdmaTransfer *transfer, uint8_t *data, int size)
-+void IDmaBe::ack_data(uint8_t *data, int size)
- {
-     // Get the source backend protocol for the first transfer
-+    IdmaTransfer *transfer = this->transfer_ack_queue.front();
-     IdmaBeConsumer *src_be = this->get_be_consumer(transfer->src, transfer->size, true);
- 
-     // And acknowledge the data to it so that the data can be freed
-@@ -195,8 +252,13 @@ void IDmaBe::ack_data(IdmaTransfer *transfer, uint8_t *data, int size)
-     {
-         this->trace.msg(vp::Trace::LEVEL_TRACE, "Finished burst (transfer: %p)\n", transfer);
- 
--        // And if so, notify the middle end
-+        // And if so, remove it and notify the middle end
-+        this->transfer_ack_queue.pop();
-         this->me->ack_transfer(transfer);
-+        if (this->transfer_ack_queue.empty())
-+        {
-+            this->transfer_regulation_event.enqueue();
-+        }
-     }
- }
- 
-diff --git a/pulp/idma/be/idma_be.hpp b/pulp/idma/be/idma_be.hpp
-index b4f2761..782dafd 100644
---- a/pulp/idma/be/idma_be.hpp
-+++ b/pulp/idma/be/idma_be.hpp
-@@ -76,11 +76,10 @@ public:
-      * Once a burst is being processed, it should call the method write_data on the backend
-      * to push a chunk of data which has been read.
-      *
--     * @param transfer DMA transfer for which the burst is enqueued
-      * @param base Base address of the burst
-      * @param size Size of the burst
-      */
--    virtual void read_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size) = 0;
-+    virtual void read_burst(uint64_t base, uint64_t size) = 0;
- 
-     /**
-      * @brief Acknowledge written data
-@@ -89,7 +88,6 @@ public:
-      * the fact that the data pushed through the method write_data has been written and
-      * can be freed.
-      *
--     * @param transfer DMA transfer for which data is acknowledged
-      * @param data Pointer to the data being acknowledged
-      */
-     virtual void write_data_ack(uint8_t *data) = 0;
-@@ -104,11 +102,10 @@ public:
-      * As soon as all the data has been written, the current burst should be released and the
-      * next one should be marked as the active one.
-      *
--     * @param transfer DMA transfer for which the burst is enqueued
-      * @param base Base address of the burst
-      * @param size Size of the burst
-      */
--    virtual void write_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size) = 0;
-+    virtual void write_burst(uint64_t base, uint64_t size) = 0;
- 
-     /**
-      * @brief Write data
-@@ -119,11 +116,10 @@ public:
-      * handle the router latency.
-      * The provided data pointer can be kept until the data has been acknowledged.
-      *
--     * @param transfer DMA transfer for which the data is written
-      * @param data Pointer to the data to be written
-      * @param size Size of the burst
-      */
--    virtual void write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size) = 0;
-+    virtual void write_data(uint8_t *data, uint64_t size) = 0;
- 
-     /**
-      * @brief Get the legal burst size
-@@ -167,10 +163,8 @@ public:
-      * A backend protocol must push data to be written to backend only if the backend is ready.
-      * This function can be called to know if it is ready.
-      * Only one chunk of data can then be written and this function must be called again.
--     *
--     * @param transfer Transfer for which the back-end wants to write data
-      */
--    virtual bool is_ready_to_accept_data(IdmaTransfer *transfer) = 0;
-+    virtual bool is_ready_to_accept_data() = 0;
- 
-     /**
-      * @brief Write data to destination backend protocol
-@@ -178,11 +172,10 @@ public:
-      * The data should be a chunk of the active burst. The method is_ready_to_accept_data must
-      * be called first to verify that the backend is ready to accept data.
-      *
--     * @param transfer Transfer for which the data is being written
-      * @param data Pointer to the data to be written
-      * @param size Size of the burst
-      */
--    virtual void write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size) = 0;
-+    virtual void write_data(uint8_t *data, uint64_t size) = 0;
- 
-     /**
-      * @brief Acknowledge write data
-@@ -190,12 +183,17 @@ public:
-      * The data received through the method write_data on backend protocol side must be acknowledge
-      * as soon as it is written to the destination pointer and the data pointer can be released
-      * by the source backend protocol.
--     *
--     * @param transfer Transfer for which written data is being acknowledge
--     * @param data Written data being acknowledged
--     * @param size Size of the written data being acknowledged
-      */
--    virtual void ack_data(IdmaTransfer *transfer, uint8_t *data, int size) = 0;
-+    virtual void ack_data(uint8_t *data, int size) = 0;
-+
-+#ifdef ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+    /**
-+     * @brief Get collective operation of current transfer
-+     */
-+    virtual uint64_t get_collective_type() = 0;
-+    virtual uint16_t get_collective_row_mask() = 0;
-+    virtual uint16_t get_collective_col_mask() = 0;
-+#endif //ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
- };
- 
- 
-@@ -229,13 +227,19 @@ public:
-     bool can_accept_transfer() override;
-     void enqueue_transfer(IdmaTransfer *transfer) override;
-     void update() override;
--    bool is_ready_to_accept_data(IdmaTransfer *transfer) override;
--    void write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size) override;
--    void ack_data(IdmaTransfer *transfer, uint8_t *data, int size) override;
-+    bool is_ready_to_accept_data() override;
-+    void write_data(uint8_t *data, uint64_t size) override;
-+    void ack_data(uint8_t *data, int size) override;
-+#ifdef ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+    uint64_t get_collective_type() override;
-+    uint16_t get_collective_row_mask() override;
-+    uint16_t get_collective_col_mask() override;
-+#endif //ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
- 
- private:
-     // FSM handler, called to check if any action should be taken after something was updated
-     static void fsm_handler(vp::Block *__this, vp::ClockEvent *event);
-+    static void transfer_regulation_handler(vp::Block *__this, vp::ClockEvent *event);
-     // Returne backend protocol corresponding to the specified range
-     IdmaBeConsumer *get_be_consumer(uint64_t base, uint64_t size, bool is_read);
-     // Pointer to middle-end, used to interact with it
-@@ -244,6 +248,7 @@ private:
-     vp::Trace trace;
-     // Block FSM event, used to trigger all checks after something has been updated
-     vp::ClockEvent fsm_event;
-+    vp::ClockEvent transfer_regulation_event;
-     // Current transfer being processed. This transfer is kept active until all bursts
-     // have been delegated to backend protocols.
-     IdmaTransfer *current_transfer;
-@@ -262,6 +267,11 @@ private:
-     IdmaBeConsumer *current_transfer_src_be;
-     // Destination backend protocol of the current transfer
-     IdmaBeConsumer *current_transfer_dst_be;
-+    // Queue of pending transfers, whose bursts have already been sent. They need to be kept
-+    // since we need transfer information when bursts are back from memory
-+    std::queue<IdmaTransfer *> regulation_queue;
-+    std::queue<IdmaTransfer *> transfer_queue;
-+    std::queue<IdmaTransfer *> transfer_ack_queue;
-     // Backend for local area
-     IdmaBeConsumer *loc_be_read;
-     IdmaBeConsumer *loc_be_write;
-diff --git a/pulp/idma/be/idma_be_axi.cpp b/pulp/idma/be/idma_be_axi.cpp
-index ddf2832..1f5fa9c 100644
---- a/pulp/idma/be/idma_be_axi.cpp
-+++ b/pulp/idma/be/idma_be_axi.cpp
-@@ -45,9 +45,6 @@ IDmaBeAxi::IDmaBeAxi(vp::Component *idma, std::string itf_name, IdmaBeProducer *
-     // Get the top parameter giving the maximum number of outstanding bursts to AXI interconnect
-     int burst_queue_size = idma->get_js_config()->get_int("burst_queue_size");
- 
--    // Get the top parameter giving the maximum burst size for AXI transactions. TCDM will alight to this parameter
--    this->burst_size = idma->get_js_config()->get_int("burst_size");
--
-     // Use it to size the array of bursts and associated timestamps
-     this->bursts.resize(burst_queue_size);
-     this->read_timestamps.resize(burst_queue_size);
-@@ -96,13 +93,22 @@ void IDmaBeAxi::reset(bool active)
-         {
-             this->pending_bursts.pop();
-         }
-+        while(this->write_axi_sending_bursts.size() > 0)
-+        {
-+            this->write_axi_sending_bursts.pop();
-+        }
-+        while(this->issued_axi_burst_order_list.size() > 0)
-+        {
-+            this->issued_axi_burst_order_list.pop();
-+        }
-+        while(this->OoO_responses_waiting_list.size() > 0)
-+        {
-+            this->OoO_responses_waiting_list.pop_front();
-+        }
- 
-         // And put back them all as free
-         for (vp::IoReq &req: this->bursts)
-         {
--            // Reserve one argument in each request, we'll use it to store the associated
--            // transfer to properly report the request termination
--            req.arg_alloc();
-             this->free_bursts.push(&req);
-         }
- 
-@@ -119,11 +125,6 @@ uint64_t IDmaBeAxi::get_burst_size(uint64_t base, uint64_t size)
- {
-     // First check maximum burst size
-     size = std::min(size, (uint64_t)AXI_PAGE_SIZE);
--    
--    if (this->burst_size>0) {
--        //Constraint AXI burst size
--        size = std::min(size, (uint64_t)this->burst_size);
--    }
- 
-     // Then page-crossing
-     uint64_t next_page = (base + AXI_PAGE_SIZE - 1) & ~(AXI_PAGE_SIZE - 1);
-@@ -137,7 +138,7 @@ uint64_t IDmaBeAxi::get_burst_size(uint64_t base, uint64_t size)
- 
- 
- 
--void IDmaBeAxi::enqueue_burst(uint64_t base, uint64_t size, bool is_write, IdmaTransfer *transfer)
-+void IDmaBeAxi::enqueue_burst(uint64_t base, uint64_t size, bool is_write)
- {
-     // Get a free burst, this method is called only if at least one is free
-     vp::IoReq *req = this->free_bursts.front();
-@@ -151,17 +152,19 @@ void IDmaBeAxi::enqueue_burst(uint64_t base, uint64_t size, bool is_write, IdmaT
-     req->set_is_write(is_write);
-     req->set_addr(base);
-     req->set_size(size);
--    *req->arg_get(0) = (void *)transfer;
-+
-+    IDmaBeAxiWriteBurstInfo info;
-+    info.base = base;
-+    info.size = size;
- 
-     this->pending_bursts.push(req);
--    this->pending_bursts_ack.push(req);
-+    this->write_axi_sending_bursts.push(info);
- 
-     // It case it is the first burst, set the pending base, this is used for writing bursts to know next
-     // req address
--    if (this->pending_bursts.size() == 1)
-+    if (this->write_axi_sending_bursts.size() == 1)
-     {
--        this->current_burst_base = this->pending_bursts.front()->get_addr();
--        this->current_burst_size = this->pending_bursts.front()->get_size();
-+        this->current_burst_base = this->write_axi_sending_bursts.front().base;
-     }
- 
-     // And trigger the FSM in case it needs to be processed now
-@@ -170,9 +173,9 @@ void IDmaBeAxi::enqueue_burst(uint64_t base, uint64_t size, bool is_write, IdmaT
- 
- 
- 
--void IDmaBeAxi::read_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size)
-+void IDmaBeAxi::read_burst(uint64_t base, uint64_t size)
- {
--    this->enqueue_burst(base, size, false, transfer);
-+    this->enqueue_burst(base, size, false);
- }
- 
- 
-@@ -187,14 +190,21 @@ void IDmaBeAxi::send_read_burst_to_axi()
-     // And also trigger the middle-end in case it has another burst to push
-     this->be->update();
- 
--    this->trace.msg(vp::Trace::LEVEL_TRACE, "Sending read burst to AXI (burst: %p, base: 0x%lx, size: 0x%lx, latency:%d)\n",
--        req, req->get_addr(), req->get_size(), req->get_latency());
-+    this->trace.msg(vp::Trace::LEVEL_TRACE, "Sending read burst to AXI (burst: %p, base: 0x%lx, size: 0x%lx)\n",
-+        req, req->get_addr(), req->get_size());
- 
-     // Reinit timings
-     req->prepare();
-+#ifdef ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+    uint8_t * payload_ptr = req->get_payload();
-+    payload_ptr[0] = (uint8_t) this->be->get_collective_type();
-+    payload_ptr[1] = (uint8_t) this->be->get_collective_row_mask();
-+    payload_ptr[2] = (uint8_t) this->be->get_collective_col_mask();
-+#endif
- 
-     // Send to AXI interface
-     vp::IoReqStatus status = this->ico_itf.req(req);
-+    this->issued_axi_burst_order_list.push(req);
- 
-     if (status == vp::IoReqStatus::IO_REQ_OK)
-     {
-@@ -219,12 +229,56 @@ void IDmaBeAxi::send_read_burst_to_axi()
- void IDmaBeAxi::read_handle_req_end(vp::IoReq *req)
- {
-     // Remember at which timestamp the burst must be notified
--    this->trace.msg(vp::Trace::LEVEL_TRACE, "Handling end of read request (req: %p, latency %d)\n", req, req->get_latency());
-     this->read_timestamps[req->id] = this->clock.get_cycles() + req->get_latency();
--    // Queue the requests, they will be notified in order.
--    this->read_waiting_bursts.push(req);
--    // Enqueue fsm event at desired timestamp in case the event is not already enqueued before
--    this->fsm_event.enqueue(std::max(req->get_latency(), (uint64_t)1));
-+
-+    // Push to OoO_responses_waiting_list
-+    this->OoO_responses_waiting_list.push_back(req);
-+
-+    // Check OoO_responses_waiting_list and order them to read_waiting_bursts
-+    std::list<vp::IoReq *>::iterator OoO_iter;
-+    while(true){
-+        if (this->issued_axi_burst_order_list.size() == 0)
-+        {
-+            if (this->OoO_responses_waiting_list.size() != 0)
-+            {
-+                this->trace.msg(vp::Trace::LEVEL_WARNING, "[iDMA ROB] OoO_responses_waiting_list has remaining entry but issued_axi_burst_order_list size is 0\n");
-+            } else {
-+                break;
-+            }
-+        }
-+
-+        if (this->OoO_responses_waiting_list.size() == 0)
-+        {
-+            break;
-+        }
-+
-+        int matched = 0;
-+        vp::IoReq *req_to_check = this->issued_axi_burst_order_list.front();
-+        for (OoO_iter = this->OoO_responses_waiting_list.begin(); OoO_iter != this->OoO_responses_waiting_list.end(); ++OoO_iter)
-+        {
-+            vp::IoReq *req_responsed = *OoO_iter;
-+            if (req_to_check == req_responsed)
-+            {
-+                matched = 1;
-+                break;
-+            }
-+        }
-+
-+        if (matched == 0)
-+        {
-+            break;
-+        }
-+
-+        this->issued_axi_burst_order_list.pop();
-+        this->read_waiting_bursts.push(req_to_check);
-+        this->OoO_responses_waiting_list.erase(OoO_iter);
-+    }
-+
-+    // Enqueue FSM when read_waiting_bursts is not empty
-+    if (this->read_waiting_bursts.size() != 0)
-+    {
-+        this->fsm_event.enqueue(1);
-+    }
- }
- 
- 
-@@ -264,32 +318,30 @@ void IDmaBeAxi::axi_response(vp::Block *__this, vp::IoReq *req)
- 
- 
- 
--void IDmaBeAxi::write_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size)
-+void IDmaBeAxi::write_burst(uint64_t base, uint64_t size)
- {
--    this->enqueue_burst(base, size, true, transfer);
-+    this->enqueue_burst(base, size, true);
- }
- 
- 
- 
--void IDmaBeAxi::write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size)
-+void IDmaBeAxi::write_data(uint8_t *data, uint64_t size)
- {
-     // Each chunk is directly sent to AXI to avoid sending whole burst at the end.
-     // Allocate a request and send it. The burst limitation is modeled with another request
-     vp::IoReq *req = new vp::IoReq();
- 
-     uint64_t base = this->current_burst_base;
--    this->current_burst_base += size;
- 
--    this->current_burst_size -= size;
--    if (this->current_burst_size == 0)
-+    //next burst base
-+    this->current_burst_base += size;
-+    this->write_axi_sending_bursts.front().size -= size;
-+    if (this->write_axi_sending_bursts.front().size == 0)
-     {
--        vp::IoReq *burst = this->pending_bursts.front();
--        this->pending_bursts.pop();
--
--        if (this->pending_bursts.size() > 0)
-+        this->write_axi_sending_bursts.pop();
-+        if (this->write_axi_sending_bursts.size() > 0)
-         {
--            this->current_burst_base = this->pending_bursts.front()->get_addr();
--            this->current_burst_size = this->pending_bursts.front()->get_size();
-+            this->current_burst_base = this->write_axi_sending_bursts.front().base;
-         }
-     }
- 
-@@ -301,8 +353,12 @@ void IDmaBeAxi::write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size)
-     req->set_addr(base);
-     req->set_size(size);
-     req->set_data(data);
--    req->arg_alloc();
--    *req->arg_get(0) = (void *)transfer;
-+#ifdef ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+    uint8_t * payload_ptr = req->get_payload();
-+    payload_ptr[0] = (uint8_t) this->be->get_collective_type();
-+    payload_ptr[1] = (uint8_t) this->be->get_collective_row_mask();
-+    payload_ptr[2] = (uint8_t) this->be->get_collective_col_mask();
-+#endif //ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
- 
-     vp::IoReqStatus status = this->ico_itf.req(req);
-     if (status == vp::IoReqStatus::IO_REQ_OK)
-@@ -329,10 +385,10 @@ void IDmaBeAxi::write_handle_req_end(vp::IoReq *req)
- 
-     // Acknowledge now the data since they are gone, to let the other backend protocol sending the
-     // rest of the burst immediately
--    this->be->ack_data((IdmaTransfer *)*req->arg_get(0), req->get_data(), req->get_size());
-+    this->be->ack_data(req->get_data(), req->get_size());
- 
-     // Account this chunk on the first pending burst
--    vp::IoReq *burst = this->pending_bursts_ack.front();
-+    vp::IoReq *burst = this->pending_bursts.front();
-     burst->set_size(burst->get_size() - req->get_size());
- 
-     this->trace.msg(vp::Trace::LEVEL_TRACE, "Updating burst remaining size (burst: %p, req_size: %d, burst_size: %d)\n",
-@@ -341,7 +397,7 @@ void IDmaBeAxi::write_handle_req_end(vp::IoReq *req)
-     // And release it in case it is done
-     if (burst->get_size() == 0)
-     {
--        this->pending_bursts_ack.pop();
-+        this->pending_bursts.pop();
-         this->free_bursts.push(burst);
-         // Notify the backend since it may schedule another burst
-         this->be->update();
-@@ -383,30 +439,37 @@ void IDmaBeAxi::fsm_handler(vp::Block *__this, vp::ClockEvent *event)
- 
-     // In case we have pending read bursts waiting for pushing data, only do it if the backend
-     // is ready to accept the data in case the destination is not ready
--    if (_this->read_waiting_bursts.size() != 0 &&
--        _this->be->is_ready_to_accept_data((IdmaTransfer *)*_this->read_waiting_bursts.front()->arg_get(0)))
-+    if (_this->read_waiting_bursts.size() != 0 )
-     {
--        vp::IoReq *req = _this->read_waiting_bursts.front();
--
--        // Push the data only once the timestamp has expired to take into account the latency
--        // returned when the data was read
--        if (_this->read_timestamps[req->id] <= _this->clock.get_cycles())
-+        if (_this->be->is_ready_to_accept_data())
-         {
--            // Move the burst to a different queue so that we can free the request when it is
--            // acknowledge
--            _this->read_waiting_bursts.pop();
--            _this->read_bursts_waiting_ack.push(req);
--
--            // Send the data
--            _this->be->write_data((IdmaTransfer *)*req->arg_get(0), req->get_data(), req->get_size());
--
--            // Trigger again the FSM since we may continue with another transfer
--            _this->fsm_event.enqueue();
-+            vp::IoReq *req = _this->read_waiting_bursts.front();
-+
-+            // Push the data only once the timestamp has expired to take into account the latency
-+            // returned when the data was read
-+            if (_this->read_timestamps[req->id] <= _this->clock.get_cycles())
-+            {
-+                // Move the burst to a different queue so that we can free the request when it is
-+                // acknowledge
-+                _this->read_waiting_bursts.pop();
-+                _this->read_bursts_waiting_ack.push(req);
-+
-+                // Send the data
-+                _this->be->write_data(req->get_data(), req->get_size());
-+
-+                // Trigger again the FSM since we may continue with another transfer
-+                _this->fsm_event.enqueue();
-+            }
-+            else
-+            {
-+                // Otherwise check again when timetamp is reached
-+                _this->fsm_event.enqueue(_this->read_timestamps[req->id] - _this->clock.get_cycles());
-+            }
-         }
-         else
-         {
--            // Otherwise check again when timetamp is reached
--            _this->fsm_event.enqueue(_this->read_timestamps[req->id] - _this->clock.get_cycles());
-+            // Enqueue FSM when read_waiting_bursts is not empty
-+            _this->fsm_event.enqueue(1);
-         }
-     }
- }
-diff --git a/pulp/idma/be/idma_be_axi.hpp b/pulp/idma/be/idma_be_axi.hpp
-index 6c2099b..3e21a6f 100644
---- a/pulp/idma/be/idma_be_axi.hpp
-+++ b/pulp/idma/be/idma_be_axi.hpp
-@@ -21,11 +21,17 @@
- #pragma once
- 
- #include <vector>
-+#include <list>
- #include <vp/vp.hpp>
- #include <vp/itf/io.hpp>
- #include "../idma.hpp"
- #include "idma_be.hpp"
- 
-+typedef struct IDmaBeAxiWriteBurstInfo {
-+    uint64_t base;
-+    uint64_t size;
-+} IDmaBeAxiWriteBurstInfo;
-+
- /**
-  * @brief AXI backend
-  *
-@@ -53,10 +59,10 @@ public:
-     void reset(bool active) override;
- 
-     void update();
--    void read_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size) override;
--    void write_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size) override;
-+    void read_burst(uint64_t base, uint64_t size) override;
-+    void write_burst(uint64_t base, uint64_t size) override;
-     void write_data_ack(uint8_t *data) override;
--    void write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size) override;
-+    void write_data(uint8_t *data, uint64_t size) override;
-     uint64_t get_burst_size(uint64_t base, uint64_t size) override;
-     bool can_accept_burst() override;
-     bool can_accept_data() override;
-@@ -72,10 +78,10 @@ private:
-     void read_handle_req_end(vp::IoReq *req);
-     // Called when a write requests is finish to handle it
-     void write_handle_req_end(vp::IoReq *req);
--    // Send the pending read burst to AXI
-+    // Send the pending read burst to AXI 
-     void send_read_burst_to_axi();
-     // Enqueue a burst to pending queue. Burst will be processed in order
--    void enqueue_burst(uint64_t base, uint64_t size, bool is_write, IdmaTransfer *transfer);
-+    void enqueue_burst(uint64_t base, uint64_t size, bool is_write);
- 
-     // Pointer to backend, used for data synchronization
-     IdmaBeProducer *be;
-@@ -105,13 +111,14 @@ private:
-     // processed.
-     std::queue<vp::IoReq *> pending_bursts;
- 
--    std::queue<vp::IoReq *> pending_bursts_ack;
-+    // Queue of pending bursts for write axi transactions. This only contains write bursts. This is decoupled from pending_bursts
-+    std::queue<IDmaBeAxiWriteBurstInfo> write_axi_sending_bursts;
- 
-     // Current base of the first transfer. This is when a chunk of data to be written is received
-     // to know the base where it should be written.
-     uint64_t current_burst_base;
--    uint64_t current_burst_size;
- 
--    // Width in bytes of AXI burst.
--    int burst_size;
-+    // Track the orders of DMA issued requests, for dealing with OoO responses
-+    std::queue<vp::IoReq *> issued_axi_burst_order_list;
-+    std::list<vp::IoReq *> OoO_responses_waiting_list;
- };
 diff --git a/pulp/idma/be/idma_be_tcdm.cpp b/pulp/idma/be/idma_be_tcdm.cpp
-index d4bb8ee..03bc255 100644
+index d4bb8ee..144747e 100644
 --- a/pulp/idma/be/idma_be_tcdm.cpp
 +++ b/pulp/idma/be/idma_be_tcdm.cpp
-@@ -62,13 +62,12 @@ void IDmaBeTcdm::activate_burst()
+@@ -44,6 +44,14 @@ IDmaBeTcdm::IDmaBeTcdm(vp::Component *idma, std::string itf_name, IdmaBeProducer
+     // Max number of pending bursts
+     this->burst_queue_maxsize = idma->get_js_config()->get_int("burst_queue_size");
+ 
++    // A component which does not declare the property gets 0, keep at least one request
++    this->tcdm_outstanding = idma->get_js_config()->get_int("tcdm_outstanding");
++    if (this->tcdm_outstanding <= 0)
++    {
++        this->tcdm_outstanding = 1;
++    }
++    this->read_reqs.resize(this->tcdm_outstanding);
++
+     // Local memory base
+     this->loc_base = idma->get_js_config()->get_int("loc_base");
+ }
+@@ -52,7 +60,8 @@ IDmaBeTcdm::IDmaBeTcdm(vp::Component *idma, std::string itf_name, IdmaBeProducer
+ 
+ void IDmaBeTcdm::activate_burst()
+ {
+-    // If queue is not empty and we don't have any active burst, activate it
++    // Delivery side: it tracks the burst whose lines are coming back, always the front one.
++    // The issue side runs ahead of it, see advance_read_issue.
+     if (this->current_burst_size == 0 && this->burst_queue_size.size() > 0)
+     {
+         this->current_burst_base = this->burst_queue_base.front();
+@@ -62,13 +71,31 @@ void IDmaBeTcdm::activate_burst()
  
  
  
--void IDmaBeTcdm::enqueue_burst(uint64_t base, uint64_t size, bool is_write, IdmaTransfer *transfer)
-+void IDmaBeTcdm::enqueue_burst(uint64_t base, uint64_t size, bool is_write)
++void IDmaBeTcdm::advance_read_issue()
++{
++    // Once a burst has been fully sent, roll on to the next one without waiting for it to come
++    // back, otherwise the pipeline drains at every burst boundary. read_issue_idx is relative to
++    // the front of the queue, so it shifts down whenever the front burst is retired.
++    if (this->read_issue_size == 0
++        && this->read_issue_idx < this->burst_queue_base.size()
++        && !this->burst_queue_is_write[this->read_issue_idx])
++    {
++        this->read_issue_base = this->burst_queue_base[this->read_issue_idx];
++        this->read_issue_size = this->burst_queue_size[this->read_issue_idx];
++        this->read_issue_transfer = this->burst_queue_transfer[this->read_issue_idx];
++        this->read_issue_idx++;
++    }
++}
++
++
++
+ void IDmaBeTcdm::enqueue_burst(uint64_t base, uint64_t size, bool is_write, IdmaTransfer *transfer)
  {
      // Just enqueue the burst and trigger the FSM, the FSM will take care of sending the requests
-     this->burst_queue_base.push(base);
-     this->burst_queue_size.push(size);
-     this->burst_queue_is_write.push(is_write);
+-    this->burst_queue_base.push(base);
+-    this->burst_queue_size.push(size);
+-    this->burst_queue_is_write.push(is_write);
 -    this->burst_queue_transfer.push(transfer);
++    this->burst_queue_base.push_back(base);
++    this->burst_queue_size.push_back(size);
++    this->burst_queue_is_write.push_back(is_write);
++    this->burst_queue_transfer.push_back(transfer);
  
      // We may need to activate the first burst
      this->activate_burst();
-@@ -80,17 +79,17 @@ void IDmaBeTcdm::enqueue_burst(uint64_t base, uint64_t size, bool is_write, Idma
- 
- 
- // Called by the backend to enqueue a read burst
--void IDmaBeTcdm::read_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size)
-+void IDmaBeTcdm::read_burst(uint64_t base, uint64_t size)
+@@ -105,13 +132,14 @@ uint64_t IDmaBeTcdm::get_burst_size(uint64_t base, uint64_t size)
+ bool IDmaBeTcdm::can_accept_burst()
  {
--    this->enqueue_burst(base, size, false, transfer);
-+    this->enqueue_burst(base, size, false);
+     // Accept a burst if we have room in the queue of pending bursts
+-    return this->burst_queue_base.size() < this->burst_queue_maxsize;
++    return (int)this->burst_queue_base.size() < this->burst_queue_maxsize;
+ }
+ 
+ bool IDmaBeTcdm::can_accept_data()
+ {
+-    // Accept data if we don't have already a chunk of data being written
+-    return this->write_current_chunk_size == 0 && this->write_ack_timestamp == -1;
++    // Take several chunks at once, so that the source back-end can keep its own requests in
++    // flight instead of waiting for each chunk to land in the memory
++    return this->write_chunks.size() < (uint32_t)this->tcdm_outstanding;
  }
  
  
- 
- // Called by the backend to enqueue a write burst
--void IDmaBeTcdm::write_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size)
-+void IDmaBeTcdm::write_burst(uint64_t base, uint64_t size)
- {
--    this->enqueue_burst(base, size, true, transfer);
-+    this->enqueue_burst(base, size, true);
- }
- 
- 
-@@ -117,7 +116,7 @@ bool IDmaBeTcdm::can_accept_data()
- 
- 
- // Called by backend to push data for the current burst
--void IDmaBeTcdm::write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size)
-+void IDmaBeTcdm::write_data(uint8_t *data, uint64_t size)
+@@ -121,17 +149,26 @@ void IDmaBeTcdm::write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size
  {
      this->trace.msg(vp::Trace::LEVEL_TRACE, "Writing data (size: 0x%lx)\n", size);
  
-@@ -128,7 +127,6 @@ void IDmaBeTcdm::write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size
-     this->write_current_chunk_base = this->current_burst_base;
-     this->write_current_chunk_data = data;
-     this->write_current_chunk_data_start = data;
+-    // Since the data may be bigger than a line, first enqueue the whole data and process it
+-    // line by line
+-    this->write_current_chunk_ack_size = size;
+-    this->write_current_chunk_size = size;
+-    this->write_current_chunk_base = this->current_burst_base;
+-    this->write_current_chunk_data = data;
+-    this->write_current_chunk_data_start = data;
 -    this->write_current_transfer = transfer;
+-
+-    // Send a line now, the rest will be handled by the FSM
+-    this->write_line();
++    // Allocate the destination address of this chunk now. The allocation cursor is independent
++    // from the retire cursor, so a chunk of the next burst can be taken while the current burst
++    // is still in flight.
++    if (this->write_alloc_remaining == 0)
++    {
++        this->write_alloc_base = this->burst_queue_base[this->write_alloc_burst];
++        this->write_alloc_remaining = this->burst_queue_size[this->write_alloc_burst];
++    }
++
++    this->write_chunks.push_back({transfer, data, size, this->write_alloc_base, 0, 0});
++
++    this->write_alloc_base += size;
++    this->write_alloc_remaining -= size;
++    if (this->write_alloc_remaining == 0)
++    {
++        this->write_alloc_burst++;
++    }
++
++    // The FSM will take care of splitting the chunk into lines
++    this->fsm_event.enqueue();
+ }
  
-     // Send a line now, the rest will be handled by the FSM
-     this->write_line();
-@@ -222,11 +220,9 @@ void IDmaBeTcdm::write_handle_req_ack()
+ 
+@@ -141,10 +178,33 @@ void IDmaBeTcdm::reset(bool active)
+     if (active)
+     {
+         this->current_burst_size = 0;
+-        this->read_pending_line_size = 0;
+ 
+-        this->write_current_chunk_size = 0;
+-        this->write_ack_timestamp = -1;
++        this->read_issue_base = 0;
++        this->read_issue_size = 0;
++        this->read_issue_transfer = NULL;
++        this->read_issue_idx = 0;
++        while (this->read_inflight.size() > 0)
++        {
++            this->read_inflight.pop();
++        }
++        while (this->free_read_reqs.size() > 0)
++        {
++            this->free_read_reqs.pop();
++        }
++        for (int i = 0; i < this->tcdm_outstanding; i++)
++        {
++            this->free_read_reqs.push(i);
++        }
++
++        this->write_chunks.clear();
++        this->write_issue_chunk = 0;
++        this->write_alloc_base = 0;
++        this->write_alloc_remaining = 0;
++        this->write_alloc_burst = 0;
++        while (this->write_inflight.size() > 0)
++        {
++            this->write_inflight.pop();
++        }
+ 
+         this->last_line_timestamp = -1;
+     }
+@@ -154,85 +214,52 @@ void IDmaBeTcdm::reset(bool active)
+ 
+ void IDmaBeTcdm::write_line()
  {
-     if (this->write_current_chunk_size == 0)
+-    // Only send the line if no line was already sent in this cycle. Since we try to send a line as
+-    // soon as we receive a request, this may happen
+-    if (this->last_line_timestamp == -1 || this->last_line_timestamp < this->clock.get_cycles())
+-    {
+-        this->last_line_timestamp = this->clock.get_cycles();
++    WriteChunk &chunk = this->write_chunks[this->write_issue_chunk];
+ 
+-        // Extract one line from current data chunk
+-        uint64_t base = this->write_current_chunk_base;
+-        uint64_t size = this->get_line_size(this->write_current_chunk_base, this->write_current_chunk_size);
++    // Extract one line from the chunk being issued
++    uint64_t base = chunk.base + chunk.issued;
++    uint64_t size = this->get_line_size(base, chunk.size - chunk.issued);
+ 
+-        this->trace.msg(vp::Trace::LEVEL_TRACE, "Writing line to TCDM (base: 0x%lx, size: 0x%lx)\n",
+-            base, size);
++    this->trace.msg(vp::Trace::LEVEL_TRACE, "Writing line to TCDM (base: 0x%lx, size: 0x%lx)\n",
++        base, size);
+ 
+-        // Prepare the line request
+-        vp::IoReq *req = &this->req;
+-
+-        req->prepare();
+-        req->set_is_write(true);
+-        req->set_addr(base - this->loc_base);
+-        req->set_size(size);
+-        req->set_data(this->write_current_chunk_data);
+-
+-        // Update chunk info for next line
+-        this->write_current_chunk_base += size;
+-        this->write_current_chunk_size -= size;
+-        this->write_current_chunk_data += size;
++    // Prepare the line request
++    vp::IoReq *req = &this->req;
+ 
+-        // Send request to TCDM
+-        vp::IoReqStatus status = this->ico_itf.req(req);
+-        if (status == vp::IoReqStatus::IO_REQ_INVALID)
+-        {
+-            trace.force_warning("Invalid access during TCDM write line (base: 0x%lx, size: 0x%lx)\n",
+-                base, size);
+-        }
+-        else if (status != vp::IoReqStatus::IO_REQ_OK)
+-        {
+-            // For now aynchronous replies are not supported since dma is always passing.
+-            // This could be needed if we want to model a more dynamic priority
+-            trace.fatal("Asynchronous response is not supported on TCDM backend\n");
+-        }
++    req->prepare();
++    req->set_is_write(true);
++    req->set_addr(base - this->loc_base);
++    req->set_size(size);
++    // The data belongs to the source back-end, it stays valid until we acknowledge the chunk
++    req->set_data(chunk.data + chunk.issued);
+ 
+-        if (req->get_latency() == 0)
+-        {
+-            // If the response has no latency, handle it now so that we can immediately continue
+-            // with the next line
+-            this->remove_chunk_from_current_burst(size);
+-            this->write_handle_req_ack();
+-        }
+-        else
+-        {
+-            // Otherwise enqueue it with timestamp so that we acknowledge it at correct time
+-            this->write_ack_timestamp = this->clock.get_cycles() + req->get_latency();
+-            this->write_ack_size = size;
+-            this->fsm_event.enqueue(req->get_latency());
+-        }
+-    }
+-    else
++    // Move the issue position on straight away, so that the next line can be sent while this
++    // one is still in flight
++    chunk.issued += size;
++    if (chunk.issued == chunk.size)
+     {
+-        this->update();
++        this->write_issue_chunk++;
+     }
+-}
+-
+-
+ 
+-void IDmaBeTcdm::write_handle_req_ack()
+-{
+-    if (this->write_current_chunk_size == 0)
++    // Send request to TCDM
++    vp::IoReqStatus status = this->ico_itf.req(req);
++    if (status == vp::IoReqStatus::IO_REQ_INVALID)
      {
 -        this->trace.msg(vp::Trace::LEVEL_TRACE, "Finished TCDM line, notifying middle-end\n");
 -
-         this->be->update();
-         // If the chunk is done, acknowledge it
+-        this->be->update();
+-        // If the chunk is done, acknowledge it
 -        this->be->ack_data(this->write_current_transfer, this->write_current_chunk_data_start, this->write_current_chunk_ack_size);
-+        this->be->ack_data(this->write_current_chunk_data_start, this->write_current_chunk_ack_size);
++        trace.force_warning("Invalid access during TCDM write line (base: 0x%lx, size: 0x%lx)\n",
++            base, size);
      }
-     else
+-    else
++    else if (status != vp::IoReqStatus::IO_REQ_OK)
      {
-@@ -266,7 +262,6 @@ void IDmaBeTcdm::remove_chunk_from_current_burst(uint64_t size)
-         this->burst_queue_base.pop();
-         this->burst_queue_size.pop();
-         this->burst_queue_is_write.pop();
+-        // Otherwise, the FSM will take care of the next line
+-        this->fsm_event.enqueue();
++        // For now aynchronous replies are not supported since dma is always passing.
++        // This could be needed if we want to model a more dynamic priority
++        trace.fatal("Asynchronous response is not supported on TCDM backend\n");
+     }
++
++    // The reply is synchronous, so we already know when the line will have landed
++    int64_t latency = (int64_t)req->get_latency();
++    this->write_inflight.push({size, (int64_t)this->clock.get_cycles() + latency});
++
++    this->fsm_event.enqueue(std::max((int64_t)1, latency));
+ }
+ 
+ 
+@@ -263,10 +290,21 @@ void IDmaBeTcdm::remove_chunk_from_current_burst(uint64_t size)
+     if (this->current_burst_size == 0)
+     {
+         // In case it is the last chunk, remove the current burst
+-        this->burst_queue_base.pop();
+-        this->burst_queue_size.pop();
+-        this->burst_queue_is_write.pop();
 -        this->burst_queue_transfer.pop();
++        this->burst_queue_base.pop_front();
++        this->burst_queue_size.pop_front();
++        this->burst_queue_is_write.pop_front();
++        this->burst_queue_transfer.pop_front();
++
++        // The issue and allocation cursors are relative to the front of the queue, so they
++        // shift down with it
++        if (this->read_issue_idx > 0)
++        {
++            this->read_issue_idx--;
++        }
++        if (this->write_alloc_burst > 0)
++        {
++            this->write_alloc_burst--;
++        }
  
          // And take the next one
          this->activate_burst();
-@@ -286,7 +281,7 @@ void IDmaBeTcdm::read_line()
-     uint64_t size = this->get_line_size(base, this->current_burst_size);
+@@ -279,30 +317,33 @@ void IDmaBeTcdm::remove_chunk_from_current_burst(uint64_t size)
+ 
+ void IDmaBeTcdm::read_line()
+ {
+-    vp::IoReq *req = &this->req;
++    // Take a free request from the pool. The caller checked that one is available.
++    int req_id = this->free_read_reqs.front();
++    this->free_read_reqs.pop();
++    vp::IoReq *req = &this->read_reqs[req_id];
+ 
+-    // Extract line from current read burst
+-    uint64_t base = this->current_burst_base;
+-    uint64_t size = this->get_line_size(base, this->current_burst_size);
++    // Extract the line from the position we have reached in the issue of the current burst
++    uint64_t base = this->read_issue_base;
++    uint64_t size = this->get_line_size(base, this->read_issue_size);
++    IdmaTransfer *transfer = this->read_issue_transfer;
  
      this->trace.msg(vp::Trace::LEVEL_TRACE, "Reading line from TCDM (base: 0x%lx, size: 0x%lx)\n",
 -            base, size);
@@ -3626,323 +3130,587 @@ index d4bb8ee..03bc255 100644
  
      // Prepare the IO request to TCDM
      req->prepare();
-@@ -312,12 +307,11 @@ void IDmaBeTcdm::read_line()
+     req->set_is_write(false);
+     req->set_addr(base - this->loc_base);
+     req->set_size(size);
+-    // Since the destination backend may keep the data until the write is done, we need
+-    // to dynamically allocate the data since we may read several times before data is acknowledged
+-    // We will free it when we receive the ack
++    // Several lines can be in flight and the destination keeps the data until the write is
++    // done, so each line owns its buffer. Freed when the ack is received.
+     req->set_data(new uint8_t[size]);
+ 
+     // Send to TCDM
+     vp::IoReqStatus status = this->ico_itf.req(req);
+     if (status == vp::IoReqStatus::IO_REQ_INVALID)
+     {
+-        trace.force_warning("Invalid access during TCDM write line (base: 0x%lx, size: 0x%lx)\n",
++        trace.force_warning("Invalid access during TCDM read line (base: 0x%lx, size: 0x%lx)\n",
+             base, size);
+     }
+     else if (status != vp::IoReqStatus::IO_REQ_OK)
+@@ -312,21 +353,17 @@ void IDmaBeTcdm::read_line()
          trace.fatal("Asynchronous response is not supported on TCDM backend\n");
      }
  
 -    if (req->get_latency() == 0 && this->be->is_ready_to_accept_data(this->burst_queue_transfer.front()))
-+    if (req->get_latency() == 0 && this->be->is_ready_to_accept_data())
-     {
-         // If there is no latency and backend is ready, we can immediately push the data
+-    {
+-        // If there is no latency and backend is ready, we can immediately push the data
 -        IdmaTransfer *transfer = this->burst_queue_transfer.front();
-         this->remove_chunk_from_current_burst(size);
+-        this->remove_chunk_from_current_burst(size);
 -        this->be->write_data(transfer, req->get_data(), size);
-+        this->be->write_data(req->get_data(), size);
-     }
-     else
-     {
-@@ -381,16 +375,15 @@ void IDmaBeTcdm::fsm_handler(vp::Block *__this, vp::ClockEvent *event)
+-    }
+-    else
+-    {
+-        // Otherwise we have to put it on hold since we can only have one request pending
+-        this->read_pending_timestamp = this->clock.get_cycles() + req->get_latency();
+-        this->read_pending_line_data = req->get_data();
+-        this->read_pending_line_size = size;
+-        this->fsm_event.enqueue(req->get_latency());
+-    }
++    // Move the issue position on straight away, so that the next line can be sent while this
++    // one is still in flight
++    this->read_issue_base += size;
++    this->read_issue_size -= size;
++
++    // The reply is synchronous, so we already know when the data can be handed over
++    int64_t latency = (int64_t)req->get_latency();
++    this->read_inflight.push({req_id, req->get_data(), size, transfer,
++        (int64_t)this->clock.get_cycles() + latency});
++
++    this->fsm_event.enqueue(std::max((int64_t)1, latency));
+ }
  
-         // If a read line is stuck because backend was not ready to receive it,
-         // check if it is now ready
--        if (_this->read_pending_line_size > 0 && _this->be->is_ready_to_accept_data(_this->burst_queue_transfer.front()))
-+        if (_this->read_pending_line_size > 0 && _this->be->is_ready_to_accept_data())
-         {
-             // Maybe it was actually stuck due to latency
-             if (_this->read_pending_timestamp <= _this->clock.get_cycles())
-             {
-                 uint64_t size = _this->read_pending_line_size;
-                 _this->read_pending_line_size = 0;
--                IdmaTransfer *transfer = _this->burst_queue_transfer.front();
-                 _this->remove_chunk_from_current_burst(size);
--                _this->be->write_data(transfer, _this->read_pending_line_data, size);
-+                _this->be->write_data(_this->read_pending_line_data, size);
-             }
-             else
-             {
-@@ -413,4 +406,4 @@ void IDmaBeTcdm::update()
- bool IDmaBeTcdm::is_empty()
+ 
+@@ -347,56 +384,103 @@ void IDmaBeTcdm::fsm_handler(vp::Block *__this, vp::ClockEvent *event)
  {
-     return this->burst_queue_base.empty();
--}
-+}
-\ No newline at end of file
+     IDmaBeTcdm *_this = (IDmaBeTcdm *)__this;
+ 
+-    // Check if we should acknowledge the previous line, this can happen when the write request
+-    // got a latency
+-    if (_this->write_ack_timestamp != -1)
++    // Retire the write lines which have landed, in issue order, so that the chunks are
++    // acknowledged in order, as the source back-end expects
++    while (_this->write_inflight.size() > 0
++        && _this->write_inflight.front().ready_timestamp <= _this->clock.get_cycles())
+     {
+-        if (_this->write_ack_timestamp <= _this->clock.get_cycles())
+-        {
+-            _this->write_ack_timestamp = -1;
+-            _this->remove_chunk_from_current_burst(_this->write_ack_size);
+-            _this->write_handle_req_ack();
+-        }
+-        else
++        uint64_t size = _this->write_inflight.front().size;
++        _this->write_inflight.pop();
++
++        // Lines land in order, so this is always the first chunk
++        WriteChunk &chunk = _this->write_chunks.front();
++        chunk.acked += size;
++        _this->remove_chunk_from_current_burst(size);
++
++        if (chunk.acked == chunk.size)
+         {
+-            _this->fsm_event.enqueue(_this->write_ack_timestamp - _this->clock.get_cycles());
++            // Acking may terminate the transfer and free it, so take a copy of what we need and
++            // make our state consistent first
++            IdmaTransfer *transfer = chunk.transfer;
++            uint8_t *data = chunk.data;
++            uint64_t chunk_size = chunk.size;
++
++            _this->write_chunks.pop_front();
++            _this->write_issue_chunk--;
++
++            _this->be->update();
++            // Keep last, it re-enters the source back-end and may terminate the transfer
++            _this->be->ack_data(transfer, data, chunk_size);
+         }
+     }
+ 
+-    // If a write chunk is pending, only send a line if we are not waiting for previous line
+-    // acknowledgement
+-    if (_this->write_current_chunk_size > 0 && _this->write_ack_timestamp == -1)
++    if (_this->write_inflight.size() > 0)
+     {
+-        // Pending write chunk
++        // Come back when the oldest line in flight has landed
++        _this->fsm_event.enqueue(
++            _this->write_inflight.front().ready_timestamp - _this->clock.get_cycles());
++    }
++
++    // Send the lines of the pending chunks, one per cycle, as long as the port still has room
++    // for another outstanding access
++    if (_this->write_issue_chunk < _this->write_chunks.size()
++        && (int)_this->write_inflight.size() < _this->tcdm_outstanding
++        && (_this->last_line_timestamp == -1
++            || _this->last_line_timestamp < _this->clock.get_cycles()))
++    {
++        _this->last_line_timestamp = _this->clock.get_cycles();
+         _this->write_line();
++        _this->fsm_event.enqueue();
+     }
+ 
+     if (_this->burst_queue_is_write.size() > 0 && !_this->burst_queue_is_write.front())
+     {
+-        // If a read burst is pending, only read new line fi previous one has been sent
+-        if (_this->current_burst_size > 0 && _this->read_pending_line_size == 0)
++        _this->advance_read_issue();
++
++        // At most one line per cycle, to respect the width of the TCDM port, and only while the
++        // port still has a slot for another outstanding access
++        if (_this->read_issue_size > 0 && _this->free_read_reqs.size() > 0
++            && (_this->last_line_timestamp == -1
++                || _this->last_line_timestamp < _this->clock.get_cycles()))
+         {
++            _this->last_line_timestamp = _this->clock.get_cycles();
+             _this->read_line();
+         }
+ 
+-        // If a read line is stuck because backend was not ready to receive it,
+-        // check if it is now ready
+-        if (_this->read_pending_line_size > 0 && _this->be->is_ready_to_accept_data(_this->burst_queue_transfer.front()))
++        // Hand over at most one line per cycle, and always in issue order, since the
++        // destination backend consumes the data sequentially.
++        if (_this->read_inflight.size() > 0)
+         {
+-            // Maybe it was actually stuck due to latency
+-            if (_this->read_pending_timestamp <= _this->clock.get_cycles())
+-            {
+-                uint64_t size = _this->read_pending_line_size;
+-                _this->read_pending_line_size = 0;
+-                IdmaTransfer *transfer = _this->burst_queue_transfer.front();
+-                _this->remove_chunk_from_current_burst(size);
+-                _this->be->write_data(transfer, _this->read_pending_line_data, size);
+-            }
+-            else
++            IDmaBeTcdm::PendingRead line = _this->read_inflight.front();
++
++            if (_this->be->is_ready_to_accept_data(line.transfer))
+             {
+-                _this->fsm_event.enqueue(_this->read_pending_timestamp - _this->clock.get_cycles());
++                if (line.ready_timestamp <= _this->clock.get_cycles())
++                {
++                    _this->read_inflight.pop();
++                    _this->free_read_reqs.push(line.req_id);
++
++                    // State must be consistent before write_data: it re-enters us synchronously
++                    // through write_data_ack
++                    _this->remove_chunk_from_current_burst(line.size);
++                    _this->be->write_data(line.transfer, line.data, line.size);
++                }
++                else
++                {
++                    // Come back when the head of the queue has its data available
++                    _this->fsm_event.enqueue(line.ready_timestamp - _this->clock.get_cycles());
++                }
+             }
+         }
++
++        bool more_to_send = _this->read_issue_size > 0
++            || _this->read_issue_idx < _this->burst_queue_base.size();
++
++        if ((more_to_send && _this->free_read_reqs.size() > 0)
++            || _this->read_inflight.size() > 0)
++        {
++            _this->fsm_event.enqueue();
++        }
+     }
+ }
+ 
 diff --git a/pulp/idma/be/idma_be_tcdm.hpp b/pulp/idma/be/idma_be_tcdm.hpp
-index 04bd23f..49fdaea 100644
+index 04bd23f..9e10cec 100644
 --- a/pulp/idma/be/idma_be_tcdm.hpp
 +++ b/pulp/idma/be/idma_be_tcdm.hpp
-@@ -46,9 +46,9 @@ public:
-     void reset(bool active) override;
+@@ -20,6 +20,9 @@
  
-     void update();
--    void read_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size) override;
--    void write_burst(IdmaTransfer *transfer, uint64_t base, uint64_t size) override;
--    void write_data(IdmaTransfer *transfer, uint8_t *data, uint64_t size) override;
-+    void read_burst(uint64_t base, uint64_t size) override;
-+    void write_burst(uint64_t base, uint64_t size) override;
-+    void write_data(uint8_t *data, uint64_t size) override;
-     void write_data_ack(uint8_t *data) override;
-     uint64_t get_burst_size(uint64_t base, uint64_t size) override;
-     bool can_accept_burst() override;
-@@ -72,7 +72,7 @@ private:
+ #pragma once
+ 
++#include <deque>
++#include <queue>
++#include <vector>
+ #include <vp/vp.hpp>
+ #include <vp/itf/io.hpp>
+ #include "../idma.hpp"
+@@ -29,7 +32,11 @@
+  * @brief TCDM back-end
+  *
+  * This back-end can be used to interface directly with a local memory.
+- * It can only send one request and is blocked until the request is done.
++ *
++ * Lines are pipelined: up to tcdm_outstanding accesses can be in flight at the same time, so
++ * that the latency reported by the interconnect is overlapped instead of being paid once per
++ * line. With tcdm_outstanding set to 1, it sends a single request and is blocked until it is
++ * done, which is the original behaviour.
+  */
+ class IDmaBeTcdm : public vp::Block, public IdmaBeConsumer
+ {
+@@ -65,18 +72,19 @@ private:
+     void write_line();
+     // Read a line from TCDM
+     void read_line();
+-    // Handle the end of a write request
+-    void write_handle_req_ack();
+     // Remove a chunk of data from current burst. This is used to track when a burst is done
+     void remove_chunk_from_current_burst(uint64_t size);
      // Extract first pending information to let FSM start writing and reading lines from it
      void activate_burst();
++    // Move the read issue cursor on to the next queued burst once the current one has been fully
++    // sent, so that lines keep being issued while earlier ones are still in flight
++    void advance_read_issue();
      // Enqueue a new burst to the queue of pending bursts
--    void enqueue_burst(uint64_t base, uint64_t size, bool is_write, IdmaTransfer *transfer);
-+    void enqueue_burst(uint64_t base, uint64_t size, bool is_write);
+     void enqueue_burst(uint64_t base, uint64_t size, bool is_write, IdmaTransfer *transfer);
  
      // Pointer to back-end, used for data synchronization
      IdmaBeProducer *be;
-@@ -99,8 +99,6 @@ private:
-     std::queue<uint64_t> burst_queue_size;
-     // Queue of pending bursts telling if burst is read or write
-     std::queue<bool> burst_queue_is_write;
+-    // AXI interface where requests can be posted
++    // TCDM interface where requests can be posted
+     vp::IoMaster ico_itf;
+     // Trace for this block, messages will be displayed with this block's name
+     vp::Trace trace;
+@@ -87,58 +95,96 @@ private:
+     int width;
+     // Top property giving the size of the queue of pending bursts
+     int burst_queue_maxsize;
++    // Number of accesses which can be in flight at the same time
++    int tcdm_outstanding;
+     // Top parameter giving base address of local memory
+     uint64_t loc_base;
+ 
+-    // Request used for TCDM accesses, only one at the same time is possible
++    // Request used for TCDM writes, only one at the same time is possible
+     vp::IoReq req;
+ 
+-    // Queue of pending bursts giving burst base address
+-    std::queue<uint64_t> burst_queue_base;
+-    // Queue of pending bursts giving burst size
+-    std::queue<uint64_t> burst_queue_size;
+-    // Queue of pending bursts telling if burst is read or write
+-    std::queue<bool> burst_queue_is_write;
 -    // Queue of transfers associated to queue of bursts
 -    std::queue<IdmaTransfer *> burst_queue_transfer;
++    // A read line which has been sent to the TCDM and is waiting for its latency to expire
++    struct PendingRead
++    {
++        // Index in read_reqs of the request used for this line
++        int req_id;
++        // Buffer holding the data read from the TCDM, freed when the destination acks it
++        uint8_t *data;
++        uint64_t size;
++        // Captured at issue time: the issue cursor can be ahead of the burst being retired, so
++        // the front of the burst queue is not necessarily this line's transfer
++        IdmaTransfer *transfer;
++        // Cycle at which the data can be handed over to the destination back-end
++        int64_t ready_timestamp;
++    };
++
++    // Pool of requests used for read lines, so that several can be in flight at once
++    std::vector<vp::IoReq> read_reqs;
++    // Indexes of the requests in read_reqs which are currently free
++    std::queue<int> free_read_reqs;
++    // Read lines in flight, in issue order. They are delivered to the destination in that same
++    // order, since the destination consumes the data sequentially
++    std::queue<PendingRead> read_inflight;
++
++    // Pending bursts. Deques, since the read side issues lines ahead of delivery and so has to
++    // look past the front burst, which is still being retired
++    std::deque<uint64_t> burst_queue_base;
++    std::deque<uint64_t> burst_queue_size;
++    std::deque<bool> burst_queue_is_write;
++    std::deque<IdmaTransfer *> burst_queue_transfer;
  
-     // Base address of currently active burst, the one from which lines are read or written
+-    // Base address of currently active burst, the one from which lines are read or written
++    // Base address of currently active burst, the one which is being retired
      uint64_t current_burst_base;
-@@ -139,6 +137,4 @@ private:
+-    // Size of currently active burst, the one from which lines are read or written
++    // Size of currently active burst, the one which is being retired
+     uint64_t current_burst_size;
+ 
+-    // When a chunk is being written line by line, this gives the base address for next line
+-    uint64_t write_current_chunk_base;
+-    // When a chunk is being written line by line, this gives the remaining size
+-    uint64_t write_current_chunk_size;
+-    // Size to be acknowledged when write response is received
+-    uint64_t write_current_chunk_ack_size;
+-    // When a chunk is being written line by line, this gives the data pointer for next line
+-    uint8_t *write_current_chunk_data;
+-    // When a chunk is being written line by line, this gives the data pointer to the beginning
+-    // of the chunk
+-    uint8_t *write_current_chunk_data_start;
+-    // Once data is written, this is set to the timestamp where the data must be acknowledged,
+-    // according to the latency reported by the interconnect
+-    int64_t write_ack_timestamp;
+-    // Size of the chunk to be acknowledged when timestamp is reached, used to update the burst
+-    uint64_t write_ack_size;
+-
+-    // When a burst is being read, this gives the timestamp for the next line, nothing is
+-    // read before this timestamp is reached, used to take into account previous request
+-    // latency
+-    int64_t read_pending_timestamp;
+-    // When a burst is being read, the last line read from TCDM may be blocked because the
+-    // backend is not ready to accept it. In this case this gives the data pointer containing the
+-    // data to be written
+-    uint8_t *read_pending_line_data;
+-    // When a burst is being read, the last line read from TCDM may be blocked because the
+-    // backend is not ready to accept it. In this case this gives the size of the
+-    // data to be written
+-    uint64_t read_pending_line_size;
++    // A chunk of data pushed by the source back-end. Several can be taken at once, so that the
++    // source can keep its own requests in flight instead of waiting for each chunk to land
++    struct WriteChunk
++    {
++        // Transfer, data pointer and size, kept verbatim: they are given back as is when acking
++        IdmaTransfer *transfer;
++        uint8_t *data;
++        uint64_t size;
++        // TCDM address of the first byte, allocated when the chunk is received
++        uint64_t base;
++        // Bytes already issued as lines
++        uint64_t issued;
++        // Bytes whose lines have already landed
++        uint64_t acked;
++    };
++
++    // A write line which has been sent to the TCDM and is waiting for its latency to expire
++    struct PendingWrite
++    {
++        uint64_t size;
++        // Cycle at which the line has landed in the memory
++        int64_t ready_timestamp;
++    };
++
++    // Chunks taken from the source back-end, popped once fully acknowledged
++    std::deque<WriteChunk> write_chunks;
++    // Index in the chunk queue of the chunk whose lines are being issued
++    uint32_t write_issue_chunk;
++    // Write lines in flight, in issue order
++    std::queue<PendingWrite> write_inflight;
++    // Address to be given to the next incoming chunk
++    uint64_t write_alloc_base;
++    // Remaining size of the burst from which chunk addresses are allocated
++    uint64_t write_alloc_remaining;
++    // Index in the burst queue of the burst from which chunk addresses are allocated
++    uint32_t write_alloc_burst;
++
++    // Address of the next read line to be issued. Tracked separately from current_burst_base,
++    // which only advances on delivery, so lines can be issued ahead of delivery
++    uint64_t read_issue_base;
++    // Size of the active read burst which still has to be issued
++    uint64_t read_issue_size;
++    // Transfer of the burst whose lines are currently being issued
++    IdmaTransfer *read_issue_transfer;
++    // Index in the burst queue of the next burst to pick up for issuing
++    uint32_t read_issue_idx;
      // Timestamp in cycles of the last time a line was read or written. Used to make sure we send
      // only one line per cycle
      int64_t last_line_timestamp;
 -    // Current transfer for which data to be written are push
 -    IdmaTransfer *write_current_transfer;
  };
-diff --git a/pulp/idma/fe/idma_fe_xdma.cpp b/pulp/idma/fe/idma_fe_xdma.cpp
-index 13892fd..1c3611a 100644
---- a/pulp/idma/fe/idma_fe_xdma.cpp
-+++ b/pulp/idma/fe/idma_fe_xdma.cpp
-@@ -30,8 +30,8 @@ IDmaFeXdma::IDmaFeXdma(vp::Component *idma, IdmaTransferConsumer *me)
-     src_stride(*this, "src_stride", 32),
-     dst_stride(*this, "dst_stride", 32),
-     reps(*this, "reps", 32),
--    next_transfer_id(*this, "next_transfer_id", 32, true, 2),
--    completed_id(*this, "completed_id", 32, true, 1),
-+    next_transfer_id(*this, "next_transfer_id", 32),
-+    completed_id(*this, "completed_id", 32),
-     do_transfer_grant(*this, "do_transfer_grant", 1)
- {
-     // Middle-end will be used later for interaction
-@@ -46,6 +46,12 @@ IDmaFeXdma::IDmaFeXdma(vp::Component *idma, IdmaTransferConsumer *me)
- 
-     // Declare offload master interface for granting blocked transfers
-     idma->new_master_port("offload_grant", &this->offload_grant_itf, this);
-+
-+    // track transfer time
-+    this->transfer_start_time = 0;
-+    this->num_inflight_transfer = 0;
-+    this->total_idma_used_time = 0;
-+    this->TxnList = "";
- }
- 
- 
-@@ -87,19 +93,20 @@ void IDmaFeXdma::offload_sync(vp::Block *__this, IssOffloadInsn<uint32_t> *insn)
-             _this->reps.set(insn->arg_a);
-             break;
-         case 0b0000011:
--            _this->trace.msg(vp::Trace::LEVEL_TRACE, "Received dmcpy operation (config: 0x%lx, size: 0x%lx)\n",
--                insn->arg_b, insn->arg_a);
--            insn->result = _this->enqueue_copy(insn->arg_b, insn->arg_a, insn->granted);
-+            _this->trace.msg(vp::Trace::LEVEL_TRACE, "Received dmcpy collectve operation (config: 0x%lx, size: 0x%lx)\n",
-+                ((insn->opcode >> 20) & 0b11111), insn->arg_a);
-+            insn->result = _this->enqueue_copy(0b00000, insn->arg_a, insn->granted, ((insn->opcode >> 20) & 0b11111));
-             break;
-         case 0b0000101:
--            // _this->trace.msg(vp::Trace::LEVEL_TRACE, "Received dmstat operation (status: 0x%lx)\n",
--            //     insn->arg_b);
--            insn->result = _this->get_status(insn->arg_b);
-+            _this->collective_row_mask = (insn->arg_b) >> 0;
-+            _this->collective_col_mask = (insn->arg_b) >> 16;
-+            _this->trace.msg(vp::Trace::LEVEL_TRACE, "Received dmmask operation (row mask: 0x%lx, col mask: 0x%lx)\n", _this->collective_row_mask, _this->collective_col_mask);
-+            insn->result = insn->arg_b;
-             break;
-         case 0b0000010:
-             _this->trace.msg(vp::Trace::LEVEL_TRACE, "Received dmcpy operation (config: 0x%lx, size: 0x%lx)\n",
-                 insn->arg_b, insn->arg_a);
--            insn->result = _this->enqueue_copy(insn->arg_b, insn->arg_a, insn->granted);
-+            insn->result = _this->enqueue_copy(insn->arg_b, insn->arg_a, insn->granted, 0);
-             break;
-         case 0b0000100:
-             // _this->trace.msg(vp::Trace::LEVEL_TRACE, "Received dmstat operation (status: 0x%lx)\n",
-@@ -117,7 +124,7 @@ uint32_t IDmaFeXdma::get_status(uint32_t status)
-     {
-         case 0: return this->completed_id.get();
-         case 1: return this->next_transfer_id.get() + 1;
--        case 2: return this->next_transfer_id.get() - this->completed_id.get() != 1;
-+        case 2: return this->completed_id.get() != this->next_transfer_id.get();
-         case 3: return !this->me->can_accept_transfer();
-     }
- 
-@@ -126,13 +133,30 @@ uint32_t IDmaFeXdma::get_status(uint32_t status)
- 
- 
- 
--uint32_t IDmaFeXdma::enqueue_copy(uint32_t config, uint32_t size, bool &granted)
-+uint32_t IDmaFeXdma::enqueue_copy(uint32_t config, uint32_t size, bool &granted, uint32_t collective_type)
- {
-     // Allocate transfer ID
-     uint32_t transfer_id = this->next_transfer_id.get();
-     this->next_transfer_id.set(transfer_id + 1);
- 
-     this->trace.msg(vp::Trace::LEVEL_TRACE, "Allocated transfer ID (id: %d)\n", transfer_id);
-+    std::stringstream ss;
-+    if (config == 0)
-+    {
-+        ss << "| Txn " << transfer_id << " = {type: 1D, src: 0x" << std::hex << this->src.get() \
-+        << ", dst: 0x" << std::hex << this->dst.get() << ", size: 0x"<< std::hex << size << " }";
-+    } else {
-+        ss << "| Txn " << transfer_id << " = {type: 2D, src: 0x" << std::hex << this->src.get() << ", src_stride: 0x" << std::hex << this->src_stride.get() \
-+        << ", dst: 0x" << std::hex << this->dst.get() << ", dst_stride: 0x" << std::hex << this->dst_stride.get() \
-+        << ", repeats: 0x" << std::hex << this->reps.get() << ", size: 0x"<< std::hex << size << " }";
-+    }
-+
-+    this->TxnList += ss.str();
-+    if (this->num_inflight_transfer == 0)
-+    {
-+        this->transfer_start_time = this->time.get_time();
-+    }
-+    this->num_inflight_transfer += 1;
- 
-     // Allocate a new transfer and fill it from registers
-     IdmaTransfer *transfer = new IdmaTransfer();
-@@ -143,19 +167,11 @@ uint32_t IDmaFeXdma::enqueue_copy(uint32_t config, uint32_t size, bool &granted)
-     transfer->dst_stride = this->dst_stride.get();
-     transfer->reps = this->reps.get();
-     transfer->config = config;
--
--    this->trace.msg(vp::Trace::LEVEL_INFO, "Enqueuing transfer (id: %d, src: %llx, dst: %llx, "
--        "size: %llx, src_stride: %llx, dst_stride: %llx, reps: %llx, config: %llx)\n",
--        transfer_id, transfer->src, transfer->dst, transfer->size, transfer->src_stride,
--        transfer->dst_stride, transfer->reps, transfer->config);
--
--    // In case size is 0 or reps is 0 with 2d transfer, directly terminate the transfer.
--    // This could be done few cycles after to better match HW.
--    if (size == 0 || ((transfer->config >> 1) & 1) && transfer->reps == 0)
--    {
--        this->ack_transfer(transfer);
--        return transfer_id;
--    }
-+#ifdef ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+    transfer->collective_type = collective_type;
-+    transfer->collective_row_mask = this->collective_row_mask;
-+    transfer->collective_col_mask = this->collective_col_mask;
-+#endif //ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
- 
-     // Check if middle end can accept a new transfer
-     if (this->me->can_accept_transfer())
-@@ -183,6 +199,13 @@ uint32_t IDmaFeXdma::enqueue_copy(uint32_t config, uint32_t size, bool &granted)
- void IDmaFeXdma::ack_transfer(IdmaTransfer *transfer)
- {
-     this->completed_id.inc(1);
-+    this->num_inflight_transfer -= 1;
-+    if (this->num_inflight_transfer == 0)
-+    {
-+        this->total_idma_used_time += (this->time.get_time() - this->transfer_start_time)/1000;
-+        this->trace.msg("[iDMA] Finished : %0d ns ---> %0d ns | period = %0d ns | runtime = %0d ns %s\n", (this->transfer_start_time/1000), (this->time.get_time()/1000), (this->time.get_time() - this->transfer_start_time)/1000, this->total_idma_used_time, this->TxnList.c_str());
-+        this->TxnList = "";
-+    }
-     delete transfer;
- }
- 
-diff --git a/pulp/idma/fe/idma_fe_xdma.hpp b/pulp/idma/fe/idma_fe_xdma.hpp
-index 300ef51..bc09050 100644
---- a/pulp/idma/fe/idma_fe_xdma.hpp
-+++ b/pulp/idma/fe/idma_fe_xdma.hpp
-@@ -20,6 +20,9 @@
- 
- #pragma once
- 
-+#include <string>
-+#include <iostream>
-+#include <sstream>
- #include <vp/vp.hpp>
- #include <cpu/iss/include/offload.hpp>
- #include <vp/register.hpp>
-@@ -51,7 +54,7 @@ private:
-     // Method for offload interface, called when the core is offloading an xdma instruction
-     static void offload_sync(vp::Block *__this, IssOffloadInsn<uint32_t> *insn);
-     // Enqueue a transfer using the current values of the registers
--    uint32_t enqueue_copy(uint32_t config, uint32_t size, bool &granted);
-+    uint32_t enqueue_copy(uint32_t config, uint32_t size, bool &granted, uint32_t collective_type);
-     // Return status
-     uint32_t get_status(uint32_t status);
- 
-@@ -82,4 +85,15 @@ private:
-     vp::Signal<bool> do_transfer_grant;
-     // In case a transfer was blocked, gives the transfer which was blocked
-     IdmaTransfer *stalled_transfer;
-+#ifdef ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+    // Transfer collective
-+    uint16_t collective_row_mask;
-+    uint16_t collective_col_mask;
-+#endif //ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+
-+    //track iDMA transfer time
-+    int64_t transfer_start_time;
-+    int64_t num_inflight_transfer;
-+    int64_t total_idma_used_time;
-+    std::string TxnList;
- };
-diff --git a/pulp/idma/idma.hpp b/pulp/idma/idma.hpp
-index 0a25bcb..cb2b021 100644
---- a/pulp/idma/idma.hpp
-+++ b/pulp/idma/idma.hpp
-@@ -23,6 +23,8 @@
- #include <vector>
- #include <vp/vp.hpp>
- 
-+#define ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+
- 
- 
- /**
-@@ -47,6 +49,12 @@ public:
-     uint64_t reps;
-     // Transfer config
-     uint64_t config;
-+#ifdef ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
-+    // Transfer collective type
-+    uint64_t collective_type;
-+    uint16_t collective_row_mask;
-+    uint16_t collective_col_mask;
-+#endif //ENABLE_DMA_SIMPLE_COLLECTIVE_IMPLEMENTATION
- 
-     // Free rom for additional information
-     std::vector<uint64_t> data;
-diff --git a/pulp/idma/idma_functional.cpp b/pulp/idma/idma_functional.cpp
-index e402244..d478579 100644
---- a/pulp/idma/idma_functional.cpp
-+++ b/pulp/idma/idma_functional.cpp
-@@ -181,7 +181,7 @@ vp::IoReqStatus IDma::req(vp::Block *__this, vp::IoReq *req)
-     uint8_t *data = req->get_data();
-     uint64_t size = req->get_size();
- 
--    _this->trace.msg("IDma access (offset: 0x%x, size: 0x%x, is_write: %d)\n", offset, size, req->get_is_write());
-+    _this->trace.msg("IDma access (offset: 0x%llx, size: 0x%x, is_write: %d)\n", offset, size, req->get_is_write());
- 
-     if (!req->get_is_write() && size == 8)
-     {
-diff --git a/pulp/idma/snitch_dma.py b/pulp/idma/snitch_dma.py
-index b338039..d2356ae 100644
---- a/pulp/idma/snitch_dma.py
-+++ b/pulp/idma/snitch_dma.py
-@@ -43,7 +43,6 @@ class SnitchDma(gvsoc.systree.Component):
-     def __init__(self, parent: gvsoc.systree.Component, name: str,
+diff --git a/pulp/idma/cheshire_dma.py b/pulp/idma/cheshire_dma.py
+index 8f7318c..966b46d 100644
+--- a/pulp/idma/cheshire_dma.py
++++ b/pulp/idma/cheshire_dma.py
+@@ -42,7 +42,8 @@ class CheshireDma(gvsoc.systree.Component):
              transfer_queue_size: int=8,
              burst_queue_size: int=8,
+             loc_base: int=0,
+-            loc_size: int=0):
++            loc_size: int=0,
++            tcdm_outstanding: int=1):
+ 
+         super().__init__(parent, name)
+ 
+@@ -60,6 +61,7 @@ class CheshireDma(gvsoc.systree.Component):
+             "burst_queue_size": burst_queue_size,
+             "loc_base": loc_base,
+             "loc_size": loc_size,
++            "tcdm_outstanding": tcdm_outstanding,
+         })
+         
+     def i_INPUT(self) -> gvsoc.systree.SlaveItf:
+diff --git a/pulp/idma/reg_dma.py b/pulp/idma/reg_dma.py
+index 4aeb3c6..61fdea7 100644
+--- a/pulp/idma/reg_dma.py
++++ b/pulp/idma/reg_dma.py
+@@ -14,8 +14,10 @@
+ # limitations under the License.
+ #
+ 
++from typing_extensions import override
+ import gvsoc.systree
+-import gvsoc.gui
++from gvsoc.gui import Signal, DisplayPulse, DisplayLogicBox
++from pulp.idma.reg_dma_config import RegDmaConfig
+ 
+ class RegDma(gvsoc.systree.Component):
+     """
+@@ -29,25 +31,12 @@ class RegDma(gvsoc.systree.Component):
+         The parent component where this one should be instantiated.
+     name: str
+         The name of the component within the parent space.
+-    transfer_queue_size: int
+-        Number of transfer requests which can be queued to the DMA.
+-    burst_queue_size: int
+-        Maximum number of outstanding burst requests.
+-    loc_base: int
+-        Base address of the local area.
+-    loc_size: int
+-        Size of the local area.
+-    tcdm_width: int
+-        Width of the local interconnect, in bytes.
++    config: RegDmaConfig
++        iDMA configuration.
+     """
+ 
+-    def __init__(self, parent: gvsoc.systree.Component, name: str,
+-            transfer_queue_size: int=8,
+-            burst_queue_size: int=8,
 -            burst_size: int=0,
+-            loc_base: int=0,
+-            loc_size: int=0,
+-            tcdm_width: int=0):
++    def __init__(self, parent: gvsoc.systree.Component, name: str, config: RegDmaConfig,
++    ):
+ 
+         super().__init__(parent, name)
+ 
+@@ -61,12 +50,13 @@ class RegDma(gvsoc.systree.Component):
+         ])
+ 
+         self.add_properties({
+-            "transfer_queue_size": transfer_queue_size,
+-            "burst_queue_size": burst_queue_size,
+-            "burst_size" : burst_size,
+-            "loc_base": loc_base,
+-            "loc_size": loc_size,
+-            "tcdm_width": tcdm_width,
++            "transfer_queue_size": config.transfer_queue_size,
++            "burst_queue_size": config.burst_queue_size,
++            "burst_size" : config.burst_size,
++            "loc_base": config.loc_base,
++            "loc_size": config.loc_size,
++            "tcdm_width": config.tcdm_width,
++            "tcdm_outstanding": config.tcdm_outstanding,
+         })
+ 
+     def i_INPUT(self) -> gvsoc.systree.SlaveItf:
+@@ -125,16 +115,18 @@ class RegDma(gvsoc.systree.Component):
+         """
+         self.itf_bind('irq', itf, signature='wire<bool>')
+ 
+-    def gen_gui(self, parent_signal):
+-        active = gvsoc.gui.Signal(self, parent_signal, name=self.name, path='fe/busy', groups='regmap', display=gvsoc.gui.DisplayLogicBox('ACTIVE'))
++    @override
++    def gen_gui(self, parent_signal: Signal):
++        active = Signal(self, parent_signal, name=self.name, path='fe/busy', groups='regmap',
++            display=DisplayLogicBox('ACTIVE'))
+ 
+         # This shows details about all the transfers which are queued to the DMA
+-        queue = gvsoc.gui.Signal(self, active, name='queue')
+-        gvsoc.gui.Signal(self, queue, name='source', path='fe/src', groups='regmap')
+-        gvsoc.gui.Signal(self, queue, name='dest', path='fe/dst', groups='regmap')
+-        gvsoc.gui.Signal(self, queue, name='length', path='fe/length', groups='regmap')
+-        gvsoc.gui.Signal(self, queue, name='src_stride', path='fe/src_stride', groups='regmap')
+-        gvsoc.gui.Signal(self, queue, name='dst_stride', path='fe/dst_stride', groups='regmap')
+-        gvsoc.gui.Signal(self, queue, name='reps', path='fe/reps', groups='regmap')
+-        gvsoc.gui.Signal(self, queue, name='id', path='fe/id', groups='regmap',
+-            display=gvsoc.gui.DisplayPulse())
++        queue = Signal(self, active, name='queue')
++        _ = Signal(self, queue, name='source', path='fe/src', groups='regmap')
++        _ = Signal(self, queue, name='dest', path='fe/dst', groups='regmap')
++        _ = Signal(self, queue, name='length', path='fe/length', groups='regmap')
++        _ = Signal(self, queue, name='src_stride', path='fe/src_stride', groups='regmap')
++        _ = Signal(self, queue, name='dst_stride', path='fe/dst_stride', groups='regmap')
++        _ = Signal(self, queue, name='reps', path='fe/reps', groups='regmap')
++        _ = Signal(self, queue, name='id', path='fe/id', groups='regmap',
++            display=DisplayPulse())
+diff --git a/pulp/idma/reg_dma_config.py b/pulp/idma/reg_dma_config.py
+new file mode 100644
+index 0000000..8317348
+--- /dev/null
++++ b/pulp/idma/reg_dma_config.py
+@@ -0,0 +1,49 @@
++#
++# Copyright (C) 2024 ETH Zurich and University of Bologna
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++#
++
++from dataclasses import dataclass
++from gvrun.config import Config, cfg_field
++
++@dataclass(repr=False)
++class RegDmaConfig(Config):
++
++    transfer_queue_size: int = cfg_field(default=8, desc=(
++        "Number of transfer requests which can be queued to the DMA."
++    ))
++
++    burst_queue_size: int = cfg_field(default=8, desc=(
++        "Maximum number of outstanding burst requests."
++    ))
++
++    burst_size: int = cfg_field(default=0, desc=(
++        "Burst size."
++    ))
++
++    loc_base: int = cfg_field(default=0, desc=(
++        "Base address of the local area."
++    ))
++
++    loc_size: int = cfg_field(default=0, desc=(
++        "Size of the local area."
++    ))
++
++    tcdm_width: int = cfg_field(default=0, desc=(
++        "Width of the local interconnect, in bytes."
++    ))
++
++    tcdm_outstanding: int = cfg_field(default=1, desc=(
++        "Number of TCDM accesses which can be in flight at the same time."
++    ))
+diff --git a/pulp/idma/snitch_dma.py b/pulp/idma/snitch_dma.py
+index b338039..db3b440 100644
+--- a/pulp/idma/snitch_dma.py
++++ b/pulp/idma/snitch_dma.py
+@@ -38,6 +38,9 @@ class SnitchDma(gvsoc.systree.Component):
+         Size of the local area.
+     tcdm_width: int
+         Width of the local interconnect, in bytes.
++    tcdm_outstanding: int
++        Number of TCDM accesses which can be in flight at the same time. 1 gives the original
++        blocking behaviour, where each line's latency is fully exposed.
+     """
+ 
+     def __init__(self, parent: gvsoc.systree.Component, name: str,
+@@ -46,7 +49,8 @@ class SnitchDma(gvsoc.systree.Component):
+             burst_size: int=0,
              loc_base: int=0,
              loc_size: int=0,
-             tcdm_width: int=0):
-@@ -62,7 +61,6 @@ class SnitchDma(gvsoc.systree.Component):
-         self.add_properties({
-             "transfer_queue_size": transfer_queue_size,
-             "burst_queue_size": burst_queue_size,
--            "burst_size" : burst_size,
+-            tcdm_width: int=0):
++            tcdm_width: int=0,
++            tcdm_outstanding: int=1):
+ 
+         super().__init__(parent, name)
+ 
+@@ -66,6 +70,7 @@ class SnitchDma(gvsoc.systree.Component):
              "loc_base": loc_base,
              "loc_size": loc_size,
              "tcdm_width": tcdm_width,
++            "tcdm_outstanding": tcdm_outstanding,
+         })
+ 
+     def i_OFFLOAD(self) -> gvsoc.systree.SlaveItf:
 diff --git a/pulp/light_redmule/light_redmule.cpp b/pulp/light_redmule/light_redmule.cpp
 index 1d3e145..be7f3af 100644
 --- a/pulp/light_redmule/light_redmule.cpp

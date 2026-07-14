@@ -16,7 +16,8 @@ class FlexMemPoolDma(gvsoc.systree.Component):
             burst_queue_size: int=8,
             loc_base: int=0,
             loc_size: int=0,
-            tcdm_width: int=0):
+            tcdm_width: int=0,
+            tcdm_outstanding: int=1):
 
         super().__init__(parent, name)
 
@@ -25,7 +26,8 @@ class FlexMemPoolDma(gvsoc.systree.Component):
                                     transfer_queue_size=transfer_queue_size,
                                     burst_queue_size=burst_queue_size,
                                     loc_base=loc_base, loc_size=loc_size,
-                                    tcdm_width=tcdm_width)
+                                    tcdm_width=tcdm_width,
+                                    tcdm_outstanding=tcdm_outstanding)
 
         self.bind(self.ctrl, 'dma_offload', self.snitch_dma, 'offload')
 
