@@ -4143,7 +4143,7 @@ index 0000000..2c00ecb
 +
 +        self.add_sources(['pulp/mempool/l1_interconnect/l1_bank_arbiter.cpp'])
 diff --git a/pulp/mempool/l1_subsystem.py b/pulp/mempool/l1_subsystem.py
-index 025b987..7ec2168 100644
+index 025b987..42fbe83 100644
 --- a/pulp/mempool/l1_subsystem.py
 +++ b/pulp/mempool/l1_subsystem.py
 @@ -22,6 +22,7 @@ from interco.router import Router
@@ -4164,12 +4164,15 @@ index 025b987..7ec2168 100644
          super(L1_subsystem, self).__init__(parent, name)
  
          #
-@@ -67,6 +69,12 @@ class L1_subsystem(gvsoc.systree.Component):
+@@ -67,6 +69,15 @@ class L1_subsystem(gvsoc.systree.Component):
          self.add_property('group_id', group_id)
  
          assert nb_remote_local_masters == 1, "Only one remote local master is supported in the L1 subsystem"
 +        # Dedicated wide RedMulE remote channel: synchronous-only, built on every tile (symmetric).
-+        redmule_path = tensorpool and not async_l1_interco
++        # RedMulE exists if and only if tensorpool is set; there is no RedMulE support otherwise.
++        assert not (tensorpool and async_l1_interco), \
++            "RedMulE (tensorpool) is only supported on the synchronous L1 interconnect"
++        redmule_path = tensorpool
 +        # Per-bank hold arbiter: cycles a bank is reserved per wide (TE) / narrow (PE) access.
 +        bank_hold = 10
 +        bank_hold_pe = 0
@@ -4177,7 +4180,7 @@ index 025b987..7ec2168 100644
          l1_bank_size = size / nb_banks_per_tile
          nb_masters = nb_pe + nb_remote_local_masters + nb_remote_group_masters + nb_remote_sub_group_masters
          nb_remote_masters = nb_remote_local_masters + nb_remote_group_masters + nb_remote_sub_group_masters
-@@ -85,7 +93,6 @@ class L1_subsystem(gvsoc.systree.Component):
+@@ -85,7 +96,6 @@ class L1_subsystem(gvsoc.systree.Component):
              tcdm = Memory(self, 'tcdm_bank%d' % i, size=l1_bank_size, width_log2=int(math.log(bandwidth, 2.0)),
                              latency=1, atomics=True)
              l1_banks.append(tcdm)
@@ -4185,11 +4188,10 @@ index 025b987..7ec2168 100644
          if async_l1_interco:
              l1_adapters = []
              for i in range(0, nb_banks_per_tile):
-@@ -96,7 +103,25 @@ class L1_subsystem(gvsoc.systree.Component):
+@@ -96,6 +106,16 @@ class L1_subsystem(gvsoc.systree.Component):
          for i in range(0, nb_pe):
              local_interleavers.append(Interleaver(self, f'local_interleaver{i}', nb_slaves=total_banks, nb_masters=1, 
                                               interleaving_bits=int(math.log2(bandwidth)), offset_translation=False))
--
 +        # Dedicated wide RedMulE path: route per *destination tile* (one wide burst/hop) instead of
 +        # per bank, so the router charges ceil(size/bandwidth) once per hop, not per 4-byte slice.
 +        if redmule_path:
@@ -4200,50 +4202,19 @@ index 025b987..7ec2168 100644
 +            # Self-tile chunk split into this tile's banks (4-byte interleaving).
 +            redmule_local_interleaver = Interleaver(self, 'redmule_local_interleaver', nb_slaves=nb_banks_per_tile, nb_masters=1,
 +                                             interleaving_bits=int(math.log2(bandwidth)), offset_translation=False)
-+        else:
-+            redmule_interleaver = Interleaver(self, 'redmule_interleaver', nb_slaves=total_banks, nb_masters=1,
-+                                             interleaving_bits=int(math.log2(bandwidth)), offset_translation=False)
-+        #add 16 interleavers for redmule
-+        #redmule_interleavers = []
-+        #for i in range(0, 16):
-+        #    redmule_interleavers.append = Interleaver(self, f'redmule_interleaver{i}', nb_slaves=total_banks, nb_masters=1, 
-+        #                                     interleaving_bits=int(math.log2(bandwidth)), offset_translation=False)
-+        
+ 
          remote_local_interleavers = []
          for i in range(0, nb_remote_local_masters):
-             remote_local_interleavers.append(Interleaver(self, f'remote_local_interleaver{i}', nb_slaves=total_banks, nb_masters=1, 
-@@ -114,48 +139,71 @@ class L1_subsystem(gvsoc.systree.Component):
+@@ -113,7 +133,7 @@ class L1_subsystem(gvsoc.systree.Component):
+                                              interleaving_bits=int(math.log2(bandwidth)), offset_translation=False))
  
          if async_l1_interco:
-             # Remote group interleavers
--            remote_out_interface = MempoolXbar(self, 'remote_out_itf', latency=1, bandwidth=bandwidth, nb_input_port=nb_pe, nb_output_port=nb_remote_masters,
-+            #added 1 to inputs for redmule
-+            remote_out_interface = MempoolXbar(self, 'remote_out_itf', latency=1, bandwidth=bandwidth, nb_input_port=(nb_pe+1), nb_output_port=nb_remote_masters,
+-            # Remote group interleavers
++            # Remote group interleavers (PE cores only: RedMulE is not supported on this path)
+             remote_out_interface = MempoolXbar(self, 'remote_out_itf', latency=1, bandwidth=bandwidth, nb_input_port=nb_pe, nb_output_port=nb_remote_masters,
                                          shared_rw_bandwidth=True, max_input_pending_size=4)
--
-+            
-+            #added 1 to all of these for redmule addaptation
-             remote_local_output_selectors = []
--            for i in range(0, nb_pe):
-+            for i in range(0, nb_pe+1):
-                 pe_selector_list = []
-                 for j in range(0, nb_remote_local_masters):
-                     pe_selector_list.append(MempoolXbarSelector(self, f'remote_local_output_selector_core{i}_out{j}', output_id=j))
-                 remote_local_output_selectors.append(pe_selector_list)
  
-             remote_sub_group_output_selectors = []
--            for i in range(0, nb_pe):
-+            for i in range(0, nb_pe+1):
-                 pe_selector_list = []
-                 for j in range(0, nb_remote_sub_group_masters):
-                     pe_selector_list.append(MempoolXbarSelector(self, f'remote_sub_group_output_selector_core{i}_out{j}', output_id=j + nb_remote_local_masters))
-                 remote_sub_group_output_selectors.append(pe_selector_list)
- 
-             remote_group_output_selectors = []
--            for i in range(0, nb_pe):
-+            for i in range(0, nb_pe+1):
-                 pe_selector_list = []
-                 for j in range(0, nb_remote_group_masters):
+@@ -138,24 +158,45 @@ class L1_subsystem(gvsoc.systree.Component):
                      pe_selector_list.append(MempoolXbarSelector(self, f'remote_group_output_selector_core{i}_out{j}', output_id=j + nb_remote_local_masters + nb_remote_sub_group_masters))
                  remote_group_output_selectors.append(pe_selector_list)
          else:
@@ -4270,7 +4241,7 @@ index 025b987..7ec2168 100644
                  remote_group_out_interfaces[i].add_mapping('output')
  
 +            # Dedicated wide RedMulE remote out interfaces; PE cores keep the narrow routers above.
-+            if tensorpool:
++            if redmule_path:
 +                redmule_remote_local_out_interfaces = []
 +                for i in range(0, nb_remote_local_masters):
 +                    redmule_remote_local_out_interfaces.append(Router(self, f'redmule_remote_local_out_itf{i}', bandwidth=redmule_bandwidth, latency=1, shared_rw_bandwidth=True, \
@@ -4292,7 +4263,7 @@ index 025b987..7ec2168 100644
          #Remote interfaces
          remote_local_in_interfaces = []
          for i in range(0, nb_remote_local_masters):
-@@ -170,6 +218,26 @@ class L1_subsystem(gvsoc.systree.Component):
+@@ -170,6 +211,26 @@ class L1_subsystem(gvsoc.systree.Component):
              remote_group_in_interfaces.append(L1_RemoteItf(self, f'remote_group_in_itf{i}', bandwidth=bandwidth, \
                                                  resp_latency=3 if terapool else 2 if (nb_sub_groups_per_group * nb_tiles_per_sub_group) > 1 else 1, synchronous=not async_l1_interco))
  
@@ -4319,7 +4290,7 @@ index 025b987..7ec2168 100644
          # DMA Interface
          dma_interface = Router(self, 'dma_itf', bandwidth=axi_data_width, latency=0, shared_rw_bandwidth=True)
          dma_interface.add_mapping('output')
-@@ -189,6 +257,14 @@ class L1_subsystem(gvsoc.systree.Component):
+@@ -189,6 +250,11 @@ class L1_subsystem(gvsoc.systree.Component):
          for i in range(0, nb_pe):
              self.bind(self, f'pe_in{i}', local_interleavers[i], 'in_0')
  
@@ -4327,14 +4298,11 @@ index 025b987..7ec2168 100644
 +        if redmule_path:
 +            # Per-destination-tile routing (wide bursts) for the dedicated RedMulE channel.
 +            self.bind(self, f'RedMulE_input', redmule_tile_interleaver, f'input')
-+        else:
-+            self.bind(self, f'RedMulE_input', redmule_interleaver, f'input')
-+
 +
          #Remote input
          for i in range(0, nb_remote_local_masters):
              self.bind(self, f'remote_local_in{i}', remote_local_in_interfaces[i], 'input')
-@@ -202,18 +278,30 @@ class L1_subsystem(gvsoc.systree.Component):
+@@ -202,6 +268,18 @@ class L1_subsystem(gvsoc.systree.Component):
              self.bind(self, f'remote_group_in{i}', remote_group_in_interfaces[i], 'input')
              self.bind(remote_group_in_interfaces[i], 'output', remote_group_interleavers[i], 'in_0')
  
@@ -4353,26 +4321,11 @@ index 025b987..7ec2168 100644
          #Remote output
          if async_l1_interco:
              for i in range(0, nb_remote_local_masters):
--                for j in range(0, nb_pe):
-+                for j in range(0, nb_pe+1):
-                     self.bind(remote_local_output_selectors[j][i], 'output', remote_out_interface, 'input' if j == 0 else f'input_{j}')
-                 self.bind(remote_out_interface, 'output', self, f'remote_local_out{i}') # only one local port, so no index offset
-             for i in range(0, nb_remote_sub_group_masters):
--                for j in range(0, nb_pe):
-+                for j in range(0, nb_pe+1):
-                     self.bind(remote_sub_group_output_selectors[j][i], 'output', remote_out_interface, 'input' if j == 0 else f'input_{j}')
-                 self.bind(remote_out_interface, f'output_{i + nb_remote_local_masters}', self, f'remote_sub_group_out{i}')
-             for i in range(0, nb_remote_group_masters):
--                for j in range(0, nb_pe):
-+                for j in range(0, nb_pe+1):
-                     self.bind(remote_group_output_selectors[j][i], 'output', remote_out_interface, 'input' if j == 0 else f'input_{j}')
-                 self.bind(remote_out_interface, f'output_{i + nb_remote_local_masters + nb_remote_sub_group_masters}', self, f'remote_group_out{i}')
-         else:
-@@ -226,6 +314,14 @@ class L1_subsystem(gvsoc.systree.Component):
+@@ -226,6 +304,14 @@ class L1_subsystem(gvsoc.systree.Component):
              for i in range(0, nb_remote_group_masters):
                  self.bind(remote_group_out_interfaces[i], 'output', self, f'remote_group_out{i}')
  
-+            if tensorpool:
++            if redmule_path:
 +                for i in range(0, nb_remote_local_masters):
 +                    self.bind(redmule_remote_local_out_interfaces[i], 'output', self, f'redmule_remote_local_out{i}')
 +                for i in range(0, nb_remote_sub_group_masters):
@@ -4383,7 +4336,7 @@ index 025b987..7ec2168 100644
          self.bind(self, 'dma', dma_interface, 'input')
          self.bind(dma_interface, 'output', dma_interleaver, 'input')
  
-@@ -242,25 +338,70 @@ class L1_subsystem(gvsoc.systree.Component):
+@@ -242,17 +328,35 @@ class L1_subsystem(gvsoc.systree.Component):
              tgt_sg_id = int((i % (nb_sub_groups_per_group * nb_tiles_per_sub_group * nb_banks_per_tile)) / (nb_tiles_per_sub_group * nb_banks_per_tile))
              if (i >= start_bank_id and i < end_bank_id):
                  remove_offset = Interleaver(self, f'remove_offset_{i}', nb_slaves=1, nb_masters=1, interleaving_bits=2, enable_shift=(total_banks - 1).bit_length(), offset_translation=False)
@@ -4413,8 +4366,6 @@ index 025b987..7ec2168 100644
 +                    self.bind(redmule_local_interleaver, 'out_%d' % (i - start_bank_id), bank_arb, 'input')
 +                    self.bind(redmule_recv_interleaver, 'out_%d' % i, bank_arb, 'input')
 +                    self.bind(bank_arb, 'output', remove_offset, 'in_0')
-+                else:
-+                    self.bind(redmule_interleaver, 'out_%d' % i, remove_offset, 'in_0')
 +                if async_l1_interco:
 +                    bank_dst = l1_adapters[i - start_bank_id]
 +                else:
@@ -4423,24 +4374,13 @@ index 025b987..7ec2168 100644
              elif tgt_grp_id == group_id:
                  if tgt_sg_id == sub_group_id:
 +                    # RedMulE remote traffic is routed per destination tile by the loop below.
-+                    if not redmule_path:
-+                        self.bind(redmule_interleaver, 'out_%d' % i, remote_local_output_selectors[0][0] if async_l1_interco else remote_local_out_interfaces[0], 'input')
                      for j, local_interleaver in enumerate(local_interleavers):
--                        self.bind(local_interleaver, 'out_%d' % i, remote_local_output_selectors[j][0] if async_l1_interco else remote_local_out_interfaces[0], 'input')
-+                        self.bind(local_interleaver, 'out_%d' % i, remote_local_output_selectors[j+1][0] if async_l1_interco else remote_local_out_interfaces[0], 'input')
+                         self.bind(local_interleaver, 'out_%d' % i, remote_local_output_selectors[j][0] if async_l1_interco else remote_local_out_interfaces[0], 'input')
                  else:
-+                    if not redmule_path:
-+                        self.bind(redmule_interleaver, 'out_%d' % i, remote_sub_group_output_selectors[0][(tgt_sg_id ^ sub_group_id) - 1] if async_l1_interco else remote_sub_group_out_interfaces[(tgt_sg_id ^ sub_group_id) - 1], 'input')
-                     for j, local_interleaver in enumerate(local_interleavers):
--                        self.bind(local_interleaver, 'out_%d' % i, remote_sub_group_output_selectors[j][(tgt_sg_id ^ sub_group_id) - 1] if async_l1_interco else remote_sub_group_out_interfaces[(tgt_sg_id ^ sub_group_id) - 1], 'input')
-+                        self.bind(local_interleaver, 'out_%d' % i, remote_sub_group_output_selectors[j+1][(tgt_sg_id ^ sub_group_id) - 1] if async_l1_interco else remote_sub_group_out_interfaces[(tgt_sg_id ^ sub_group_id) - 1], 'input')
-             else:
-+                if not redmule_path:
-+                    self.bind(redmule_interleaver, 'out_%d' % i, remote_group_output_selectors[0][(tgt_grp_id ^ group_id) - 1] if async_l1_interco else remote_group_out_interfaces[(tgt_grp_id ^ group_id) - 1], 'input')
+@@ -262,6 +366,25 @@ class L1_subsystem(gvsoc.systree.Component):
                  for j, local_interleaver in enumerate(local_interleavers):
--                    self.bind(local_interleaver, 'out_%d' % i, remote_group_output_selectors[j][(tgt_grp_id ^ group_id) - 1] if async_l1_interco else remote_group_out_interfaces[(tgt_grp_id ^ group_id) - 1], 'input')
-+                    self.bind(local_interleaver, 'out_%d' % i, remote_group_output_selectors[j+1][(tgt_grp_id ^ group_id) - 1] if async_l1_interco else remote_group_out_interfaces[(tgt_grp_id ^ group_id) - 1], 'input')
-+
+                     self.bind(local_interleaver, 'out_%d' % i, remote_group_output_selectors[j][(tgt_grp_id ^ group_id) - 1] if async_l1_interco else remote_group_out_interfaces[(tgt_grp_id ^ group_id) - 1], 'input')
+ 
 +        # Dedicated RedMulE remote routing: one wide burst per destination tile. Same local/sub-group/
 +        # group class selection as the per-bank decode; the self tile is bank-split locally.
 +        if redmule_path:
@@ -4459,10 +4399,11 @@ index 025b987..7ec2168 100644
 +                else:
 +                    self.bind(redmule_tile_interleaver, 'out_%d' % t, redmule_remote_group_out_interfaces[(tgt_grp_id ^ group_id) - 1], 'input')
 +                    
- 
++
      def i_DMA_INPUT(self) -> gvsoc.systree.SlaveItf:
          return gvsoc.systree.SlaveItf(self, f'dma_input', signature='io')
-@@ -316,4 +457,4 @@ class L1_subsystem(gvsoc.systree.Component):
+ 
+@@ -316,4 +439,4 @@ class L1_subsystem(gvsoc.systree.Component):
          if id is not None:
              mapping['id'] = id
  
@@ -5003,10 +4944,10 @@ index 91e50b9..8de7914 100644
 +
 +        self.bind(clock, 'out', soc, 'clock')
 diff --git a/pulp/mempool/mempool_tile.py b/pulp/mempool/mempool_tile.py
-index 42bac60..9fc3cef 100644
+index 42bac60..1084851 100644
 --- a/pulp/mempool/mempool_tile.py
 +++ b/pulp/mempool/mempool_tile.py
-@@ -25,19 +25,43 @@ import gvsoc.systree as st
+@@ -25,19 +25,45 @@ import gvsoc.systree as st
  from pulp.snitch.sequencer import Sequencer
  from pulp.mempool.l1_interconnect.l1_address_scrambler import L1_AddressScrambler
  
@@ -5021,9 +4962,11 @@ index 42bac60..9fc3cef 100644
 +    def __init__(self, parent, name, parser, redmule_config: RedmuleParam=None, has_redmule: bool=False, tensorpool: bool=False, terapool: bool=False, async_l1_interco: bool=False, tile_id: int=0, sub_group_id: int=0, group_id: int=0, nb_cores_per_tile: int=4, nb_sub_groups_per_group: int=1, nb_groups: int=4, total_cores: int= 256, bank_factor: int=4, bank_size: int=1024, axi_data_width: int=64, redmule_bandwidth: int=64):
          super().__init__(parent, name)
  
-+    #add new parameter has_redmule: bool=false
-+        
-+        if has_redmule: 
++        # A RedMulE can only be instantiated on the tensorpool configuration, which is the only
++        # one providing the dedicated wide RedMulE L1 path.
++        assert not has_redmule or tensorpool, "has_redmule requires the tensorpool configuration"
++
++        if has_redmule:
 +            # REDMULE
 +            #redmule = LightRedmule(self, 'redmule')
 +            redmule = LightRedmule(self, f'tile-{tile_id}-redmule',
@@ -5052,7 +4995,7 @@ index 42bac60..9fc3cef 100644
          # Hardware parameters
          nb_remote_group_ports = nb_groups - 1
          nb_remote_sub_group_ports = nb_sub_groups_per_group - 1
-@@ -45,7 +69,7 @@ class Tile(st.Component):
+@@ -45,7 +71,7 @@ class Tile(st.Component):
          # global_tile_id = tile_id + group_id * nb_tiles_per_group
          Xfrep = 0
          # stack_size_per_tile = 0x800
@@ -5061,7 +5004,7 @@ index 42bac60..9fc3cef 100644
  
          # Snitch core complex
          self.int_cores = []
-@@ -64,7 +88,8 @@ class Tile(st.Component):
+@@ -64,7 +90,8 @@ class Tile(st.Component):
                                          nb_tiles_per_sub_group=nb_tiles_per_sub_group, nb_sub_groups_per_group=nb_sub_groups_per_group, \
                                          nb_groups=nb_groups, nb_remote_local_masters=1, nb_remote_group_masters=nb_remote_group_ports, \
                                          nb_remote_sub_group_masters=nb_remote_sub_group_ports, nb_pe=nb_cores_per_tile, \
@@ -5071,7 +5014,7 @@ index 42bac60..9fc3cef 100644
          # Shared icache
          icache = Hierarchical_cache(self, 'shared_icache', nb_cores=nb_cores_per_tile)
  
-@@ -112,9 +137,17 @@ class Tile(st.Component):
+@@ -112,9 +139,17 @@ class Tile(st.Component):
  
          # ICO --> L1 TCDM
          for i in range(0, nb_cores_per_tile):
@@ -5090,7 +5033,7 @@ index 42bac60..9fc3cef 100644
          # L1 TCDM --> Remote TCDM interfaces
          self.bind(self, 'loc_remt_slave_in', l1, 'remote_local_in0')
          self.bind(l1, 'remote_local_out0', self, 'loc_remt_master_out')
-@@ -127,6 +160,19 @@ class Tile(st.Component):
+@@ -127,6 +162,19 @@ class Tile(st.Component):
              self.bind(self, f'grp_remt{i}_slave_in', l1, f'remote_group_in{i}')
              self.bind(l1, f'remote_group_out{i}', self, f'grp_remt{i}_master_out')
  
@@ -5110,7 +5053,7 @@ index 42bac60..9fc3cef 100644
          self.bind(self, 'dma_tcdm', l1, 'dma')
  
          # ICO -> AXI -> L2 Memory
-@@ -148,10 +194,25 @@ class Tile(st.Component):
+@@ -148,10 +196,25 @@ class Tile(st.Component):
          # AXI -> Remote AXI port
          self.bind(axi_ico, 'output', self, 'axi_out')
  
@@ -5138,6 +5081,13 @@ index 42bac60..9fc3cef 100644
          # Core Interconnections
          for core_id in range(0, nb_cores_per_tile):
              # Icache
+@@ -188,4 +251,4 @@ class Tile(st.Component):
+                     self.bind(self.int_cores[core_id], 'acc_req', self.fp_cores[core_id], 'acc_req')
+                     self.bind(self.int_cores[core_id], 'acc_req_ready', self.fp_cores[core_id], 'acc_req_ready')
+ 
+-                self.bind(self.fp_cores[core_id], 'acc_rsp', self.int_cores[core_id], 'acc_rsp')
++                self.bind(self.fp_cores[core_id], 'acc_rsp', self.int_cores[core_id], 'acc_rsp')
+\ No newline at end of file
 diff --git a/pulp/mempool/redmule_configurations.py b/pulp/mempool/redmule_configurations.py
 new file mode 100644
 index 0000000..0a49f07
