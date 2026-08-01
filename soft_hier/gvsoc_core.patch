@@ -1,3 +1,27 @@
+diff --git a/models/cpu/iss/include/cores/snitch_fast/class.hpp b/models/cpu/iss/include/cores/snitch_fast/class.hpp
+index 397bcc76..0e359376 100644
+--- a/models/cpu/iss/include/cores/snitch_fast/class.hpp
++++ b/models/cpu/iss/include/cores/snitch_fast/class.hpp
+@@ -115,10 +115,19 @@ public:
+ 
+     CsrReg csr_fmode;
+ 
++    // Mempool CSR_TRACE (0x7d0), written by mempool_start_benchmark() and
++    // mempool_stop_benchmark() to delimit a region of interest.
++    CsrReg bench_csr;
++    int64_t bench_start_cycles;
++    int64_t bench_start_time;
++    uint32_t bench_region;
++    bool bench_active;
++
+ 
+ private:
+     bool barrier_update(bool is_write, iss_reg_t &value);
+     static void barrier_sync(vp::Block *__this, bool value);
++    bool bench_csr_update(bool is_write, iss_reg_t &value);
+ 
+     vp::WireMaster<bool> barrier_req_itf;
+     vp::WireSlave<bool> barrier_ack_itf;
 diff --git a/models/cpu/iss/src/snitch_fast/sequencer.cpp b/models/cpu/iss/src/snitch_fast/sequencer.cpp
 index b7a11e7a..1974ead3 100644
 --- a/models/cpu/iss/src/snitch_fast/sequencer.cpp
@@ -19,6 +43,87 @@ index b7a11e7a..1974ead3 100644
      }
  }
  
+diff --git a/models/cpu/iss/src/snitch_fast/snitch.cpp b/models/cpu/iss/src/snitch_fast/snitch.cpp
+index 6366d004..1df8320f 100644
+--- a/models/cpu/iss/src/snitch_fast/snitch.cpp
++++ b/models/cpu/iss/src/snitch_fast/snitch.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include "cpu/iss/include/iss.hpp"
+ #include <string.h>
++#include <inttypes.h>
+ 
+ 
+ Iss::Iss(IssWrapper &top)
+@@ -44,6 +45,10 @@ Iss::Iss(IssWrapper &top)
+     this->barrier.register_callback(std::bind(&Iss::barrier_update, this, std::placeholders::_1,
+         std::placeholders::_2));
+ 
++    this->csr.declare_csr(&this->bench_csr, "trace", 0x7d0);
++    this->bench_csr.register_callback(std::bind(&Iss::bench_csr_update, this,
++        std::placeholders::_1, std::placeholders::_2));
++
+     this->barrier_ack_itf.set_sync_meth(&Iss::barrier_sync);
+     this->top.new_slave_port("barrier_ack", &this->barrier_ack_itf, (vp::Block *)this);
+ 
+@@ -79,6 +84,42 @@ bool Iss::barrier_update(bool is_write, iss_reg_t &value)
+ }
+ 
+ 
++// This gets called when the mempool trace csr (0x7d0) is accessed.
++// mempool_start_benchmark() writes 1 to open a region of interest, mempool_stop_benchmark()
++// writes 0 to close it, at which point we report how long the region took.
++bool Iss::bench_csr_update(bool is_write, iss_reg_t &value)
++{
++    if (!is_write)
++    {
++        return true;
++    }
++
++    if (value != 0)
++    {
++        this->bench_start_cycles = this->top.clock.get_cycles();
++        this->bench_start_time = this->top.time.get_time();
++        this->bench_active = true;
++    }
++    else if (this->bench_active)
++    {
++        int64_t end_cycles = this->top.clock.get_cycles();
++        int64_t end_time = this->top.time.get_time();
++
++        printf("[BENCH] cycles=%" PRId64 " ns=%" PRId64 " start=%" PRId64 " end=%" PRId64
++            " region=%u hart=%d path=%s\n",
++            end_cycles - this->bench_start_cycles,
++            (end_time - this->bench_start_time) / 1000,
++            this->bench_start_cycles, end_cycles,
++            this->bench_region++, (int)this->csr.mhartid,
++            this->top.get_path().c_str());
++
++        this->bench_active = false;
++    }
++
++    return true;
++}
++
++
+ // This gets called when the barrier is reached
+ void Iss::barrier_sync(vp::Block *__this, bool value)
+ {
+@@ -154,6 +195,14 @@ void IssWrapper::reset(bool active)
+     this->iss.decode.reset(active);
+     this->iss.gdbserver.reset(active);
+ 
++    if (active)
++    {
++        this->iss.bench_active = false;
++        this->iss.bench_region = 0;
++        this->iss.bench_start_cycles = 0;
++        this->iss.bench_start_time = 0;
++    }
++
+ #if defined(CONFIG_GVSOC_ISS_USE_SPATZ)
+     this->iss.syscalls.reset(active);
+     this->iss.vector.reset(active);
 diff --git a/models/utils/common_cells.py b/models/utils/common_cells.py
 index 3916ea4f..24a4d07d 100644
 --- a/models/utils/common_cells.py
