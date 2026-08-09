@@ -262,7 +262,7 @@ def plot_bars(records: List[PipelineRecord], title: str, out_path: Path) -> None
     draw_decimal(axL, [latency_ms(r) for r in recs],
                  'latency [ms]', 'latency per execution  =  steps $\\times$ $T_{pipe}$')
     draw_antennas(axR, [throughput_ant_ms(r) for r in recs],
-                  'throughput [antennas/ms]  (whole + partial)', 'throughput  =  1 / T_pipe')
+                  'throughput [antennas/ms]  (whole + partial)', 'throughput  =  1 / $T_{pipe}$')
 
     fig.suptitle(title, fontsize=13)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -274,7 +274,7 @@ def plot_bars(records: List[PipelineRecord], title: str, out_path: Path) -> None
 def figure_title(records: List[PipelineRecord], inputs: List[Path]) -> str:
     """One line naming what is on the axes: the run, and its size when they agree."""
     base = (inputs[0].stem if len(inputs) == 1
-            else f'CEViT  ({len(inputs)} runs)')
+            else f'CEViT ')
     sizes = {r.n_clusters for r in records}
     return f'{base}  ({sizes.pop()}-cluster pipeline)' if len(sizes) == 1 else base
 

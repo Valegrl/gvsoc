@@ -1121,13 +1121,10 @@ LAYER_FALLBACK = {
     True:  ("#98df8a", "#7fcdbb", "#9edae5", "#1f77b4", "#aec7e8"),
 }
 
-# How a class is spelled in the legend.  The two L1 paths are named for what
-# they touch rather than for the link: a NoC hand-off is a write into another
-# cluster's L1, its local sibling a copy within the cluster's own.
+# How a class is spelled in the legend.
 LAYER_LEGEND = {
-    "DMA L1":  "DMA local L1 (layout copy)",
     "DMA NoC": "DMA remote L1",
-    "RSHP":    "RSHP patch <-> grid (cores)",
+    "RSHP":    "RSHP",
 }
 
 
