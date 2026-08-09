@@ -124,6 +124,96 @@ index 6366d004..1df8320f 100644
  #if defined(CONFIG_GVSOC_ISS_USE_SPATZ)
      this->iss.syscalls.reset(active);
      this->iss.vector.reset(active);
+diff --git a/models/memory/dramsys.cpp b/models/memory/dramsys.cpp
+index b3b1eb29..bae71a24 100644
+--- a/models/memory/dramsys.cpp
++++ b/models/memory/dramsys.cpp
+@@ -103,6 +103,10 @@ private:
+ 
+     std::queue<vp::IoReq *>  denied_req_queue;
+     std::list<std::pair<vp::IoReq *, std::queue<int>>>  pending_read_req_queue;
++    // A read is completed byte by byte off its mask list, a write only has to be counted down:
++    // DRAMSys acknowledges one write per access_size request it was handed, in issue order, so
++    // what is tracked here is the number of those still outstanding.
++    std::list<std::pair<vp::IoReq *, uint64_t>>  pending_write_req_queue;
+ };
+ 
+ ddr::ddr(vp::ComponentConf &config)
+@@ -232,14 +236,17 @@ void ddr::paraSendRequest(vp::IoReq *req){
+         dram_send_req(dram_id, req_start_addr + iter*memspec.access_size, memspec.access_size, req->get_is_write(), req->get_is_write());
+     }
+ 
+-    //queue read request
+-    std::pair<vp::IoReq *, std::queue<int>> pair;
+-    pair.first = req;
+-    pair.second = mask_d;
++    //queue the request until the DRAM answers it
+     if (!req->get_is_write())
+     {
++        std::pair<vp::IoReq *, std::queue<int>> pair;
++        pair.first = req;
++        pair.second = mask_d;
+         pending_read_req_queue.push_back(pair);
+         trace.msg("---- Add in Pending list: mask length->%d \n",pair.second.size());
++    } else {
++        pending_write_req_queue.push_back(std::make_pair(req, num_req));
++        trace.msg("---- Add in Pending write list: #DRAM requests->%d \n", num_req);
+     }
+ 
+ }
+@@ -257,7 +264,8 @@ vp::IoReqStatus ddr::req(vp::Block *__this, vp::IoReq *req)
+     if (_this->dram_can_accept_req(_this->dram_id))
+     {
+         _this->paraSendRequest(req);
+-        if (req->get_is_write()) return vp::IO_REQ_OK;
++        // Writes are pending too: retiring them as soon as the controller had buffered the data
++        // let an initiator push a burst through faster than the DRAM could ever commit it.
+         return vp::IO_REQ_PENDING;
+     }else{
+         _this->denied_req_queue.push(req);
+@@ -297,7 +305,20 @@ void ddr::rspCallback(void *__this, int is_write){
+ 
+     if (is_write)
+     {
+-        while(_this->dram_has_write_rsp(_this->dram_id)) rep_byte_int = _this->dram_get_write_rsp(_this->dram_id);
++        while(_this->dram_has_write_rsp(_this->dram_id) && _this->pending_write_req_queue.size() != 0){
++            _this->dram_get_write_rsp(_this->dram_id);
++            _this->pending_write_req_queue.front().second--;
++
++            //Response the request once every access_size request it was split into has been
++            //acknowledged, so the initiator stays back-pressured by the DRAM write rate.
++            if (_this->pending_write_req_queue.front().second == 0)
++            {
++                vp::IoReq *req = _this->pending_write_req_queue.front().first;
++                _this->trace.msg("---- Response write \n");
++                req->get_resp_port()->resp(req);
++                _this->pending_write_req_queue.pop_front();
++            }
++        }
+     } else {
+         while(_this->dram_has_read_rsp(_this->dram_id) && _this->pending_read_req_queue.size() != 0){
+             vp::IoReq *req = _this->pending_read_req_queue.front().first;
+@@ -344,7 +365,6 @@ void ddr::reqCallback(void *__this){
+         vp::IoReq *req = _this->denied_req_queue.front();
+         _this->paraSendRequest(req);
+         req->get_resp_port()->grant(req);
+-        if (req->get_is_write()) req->get_resp_port()->resp(req);
+         _this->denied_req_queue.pop();
+     }
+ }
+diff --git a/models/memory/dramsys.py b/models/memory/dramsys.py
+index efb437e1..4c954df2 100644
+--- a/models/memory/dramsys.py
++++ b/models/memory/dramsys.py
+@@ -26,7 +26,7 @@ class Dramsys(st.Component):
+ 
+         self.add_properties({
+             'require_systemc': True,
+-            'dram-type': 'hbm2-example.json',
++            'dram-type': 'lpddr4-example.json',
+             'pim-support': pim_support,
+         })
+ 
 diff --git a/models/utils/common_cells.py b/models/utils/common_cells.py
 index 3916ea4f..24a4d07d 100644
 --- a/models/utils/common_cells.py
