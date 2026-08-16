@@ -1,5 +1,5 @@
 diff --git a/pulp/floonoc/floonoc.cpp b/pulp/floonoc/floonoc.cpp
-index bb1bd9b..5146e08 100644
+index bb1bd9b..ee6fd4b 100644
 --- a/pulp/floonoc/floonoc.cpp
 +++ b/pulp/floonoc/floonoc.cpp
 @@ -17,7 +17,6 @@
@@ -112,7 +112,7 @@ index bb1bd9b..5146e08 100644
      if (routers != NULL)
      {
          for (js::Config *router: routers->get_elems())
-@@ -118,117 +114,82 @@ FlooNoc::FlooNoc(vp::ComponentConf &config)
+@@ -118,117 +114,83 @@ FlooNoc::FlooNoc(vp::ComponentConf &config)
              int x = router->get_elem(0)->get_int();
              int y = router->get_elem(1)->get_int();
  
@@ -164,7 +164,8 @@ index bb1bd9b..5146e08 100644
 -        for (int y=0; y<this->dim_y; y++)
 +        vp::IoReq * parent = *(vp::IoReq **)req->arg_get(FlooNoc::REQ_PARENT);
 +        process_collective_operations(parent, req);
-+        delete req->get_data();
++        // Allocated with new uint8_t[] in Router::collective_generate
++        delete[] req->get_data();
 +        delete req;
 +        parent->set_int(FlooNoc::REQ_PEND_KIDS, parent->get_int(FlooNoc::REQ_PEND_KIDS) - 1);
 +        if (parent->get_int(FlooNoc::REQ_PEND_KIDS) <= 0)
@@ -289,7 +290,7 @@ index bb1bd9b..5146e08 100644
  }
  
  
-@@ -246,8 +207,7 @@ Entry *FlooNoc::get_entry(uint64_t base, uint64_t size)
+@@ -246,8 +208,7 @@ Entry *FlooNoc::get_entry(uint64_t base, uint64_t size)
      for (int i=0; i<this->entries.size(); i++)
      {
          Entry *entry = &this->entries[i];
@@ -299,7 +300,7 @@ index bb1bd9b..5146e08 100644
          {
              return entry;
          }
-@@ -261,3 +221,115 @@ extern "C" vp::Component *gv_new(vp::ComponentConf &config)
+@@ -261,3 +222,115 @@ extern "C" vp::Component *gv_new(vp::ComponentConf &config)
  {
      return new FlooNoc(config);
  }
@@ -889,10 +890,10 @@ index d0c9b02..8c0dbb1 100644
 -    pass
 \ No newline at end of file
 diff --git a/pulp/floonoc/floonoc_network_interface.cpp b/pulp/floonoc/floonoc_network_interface.cpp
-index 9192ccd..08e15ad 100644
+index 9192ccd..8de271b 100644
 --- a/pulp/floonoc/floonoc_network_interface.cpp
 +++ b/pulp/floonoc/floonoc_network_interface.cpp
-@@ -17,663 +17,308 @@
+@@ -17,663 +17,330 @@
  
  /*
   * Authors: Germain Haugou, ETH (germain.haugou@iis.ee.ethz.ch)
@@ -966,8 +967,8 @@ index 9192ccd..08e15ad 100644
 -{
 -    return true;
 -}
--
--
+ 
+ 
 -void NetworkQueue::enqueue_router_req(vp::IoReq *req, bool is_address, bool wide, bool is_req)
 -{
 -    uint64_t burst_base = req->get_addr();
@@ -1093,7 +1094,7 @@ index 9192ccd..08e15ad 100644
 -    {
 -        this->trace.msg(vp::Trace::LEVEL_TRACE, "Stalling network interface (position: (%d, %d))\n", this->ni.x, this->ni.y);
 -    }
- 
+-
 -    // Since we processed a burst, we need to check again in the next cycle if there is
 -    // anything to do.
 -    if (this->queue.size() > 0)
@@ -1101,7 +1102,7 @@ index 9192ccd..08e15ad 100644
 -        this->ni.fsm_event.enqueue();
 -    }
 -}
- 
+-
 -NetworkInterface::NetworkInterface(FlooNoc *noc, int x, int y, std::string itf_name)
 -    : FloonocNode(noc, "ni_" + std::to_string(x) + "_" + std::to_string(y)),
 -      fsm_event(this, &NetworkInterface::fsm_handler), signal_narrow_req(*this, "narrow_req", 64),
@@ -1174,14 +1175,14 @@ index 9192ccd..08e15ad 100644
 -    NetworkInterface *_this = (NetworkInterface *)__this;
 -    _this->handle_response(req);
 -}
--
+ 
 -// This gets called after a request sent to a target was denied, and it is now granted
 -void NetworkInterface::wide_grant(vp::Block *__this, vp::IoReq *req)
 -{
 -    NetworkInterface *_this = (NetworkInterface *)__this;
 -    _this->grant(req);
 -}
- 
+-
 -// This gets called when a request was pending and the response is received
 -void NetworkInterface::narrow_response(vp::Block *__this, vp::IoReq *req)
 -{
@@ -1343,14 +1344,14 @@ index 9192ccd..08e15ad 100644
 -bool NetworkInterface::handle_request(FloonocNode *node, vp::IoReq *req, int from_x, int from_y)
 -{
 -    NetworkInterface *origin_ni = *(NetworkInterface **)req->arg_get(FlooNoc::REQ_SRC_NI);
+-
+-    if (origin_ni == NULL)
+-    {
+-        this->trace.msg(vp::Trace::LEVEL_DEBUG, "Received response from router (req: %p)\n", req);
 +        // THen pop an internal request and fill it from current burst information
 +        vp::IoReq *req = _this->free_reqs.front();
 +        _this->free_reqs.pop();
  
--    if (origin_ni == NULL)
--    {
--        this->trace.msg(vp::Trace::LEVEL_DEBUG, "Received response from router (req: %p)\n", req);
--
 -        vp::IoReq *burst = *(vp::IoReq **)req->arg_get(FlooNoc::REQ_BURST);
 -        bool wide = *(vp::IoReq **)req->arg_get(FlooNoc::REQ_WIDE);
 +        // Get base from current burst
@@ -1469,6 +1470,7 @@ index 9192ccd..08e15ad 100644
 +        *req->arg_get(FlooNoc::REQ_COL_MASK) = (void *)0;
 +        *req->arg_get(FlooNoc::REQ_PEND_KIDS) = (void *)0;
 +        *req->arg_get(FlooNoc::REQ_MOMENTUM) = (void *)FlooNoc::MOMENTUM_ZERO;
++        uint8_t collective_type = 0;
 +        if (_this->noc->collective)
          {
 -            bool is_stalled = false;
@@ -1486,7 +1488,7 @@ index 9192ccd..08e15ad 100644
 -            vp::IoReqStatus result = target->req(req);
 -
 -            if (result == vp::IO_REQ_OK)
-+            uint8_t collective_type = burst->get_payload()[0];
++            collective_type = burst->get_payload()[0];
 +            _this->trace.msg(vp::Trace::LEVEL_DEBUG, "[Collective] preload[0] of burst %d\n",collective_type);
 +            if (collective_type>0 && collective_type<8)
              {
@@ -1498,18 +1500,20 @@ index 9192ccd..08e15ad 100644
 -                {
 -                    this->handle_response(req);
 -                }
--            }
--            else if (result == vp::IO_REQ_DENIED)
--            {
--                // Store the NI in the request. Since the grant is received by top noc,
--                // it will use this argument to notify the NI about the grant
--                this->target_stalled = true;
--                is_stalled = true;
 +                uint8_t row_mask = burst->get_payload()[1];
 +                uint8_t col_mask = burst->get_payload()[2];
 +                req->set_int(FlooNoc::REQ_COLL_TYPE, collective_type);
 +                req->set_int(FlooNoc::REQ_ROW_MASK, row_mask);
 +                req->set_int(FlooNoc::REQ_COL_MASK, col_mask);
+             }
+-            else if (result == vp::IO_REQ_DENIED)
++            else
+             {
+-                // Store the NI in the request. Since the grant is received by top noc,
+-                // it will use this argument to notify the NI about the grant
+-                this->target_stalled = true;
+-                is_stalled = true;
++                collective_type = 0;
              }
 +        }
  
@@ -1557,11 +1561,6 @@ index 9192ccd..08e15ad 100644
 -    _this->wide_queue.check();
 -
 -
--
--    if (!_this->response_queue.empty())
--    {
--        _this->handle_response((vp::IoReq *)_this->response_queue.pop());
--    }
 +            // Update the current burst for next request
 +            _this->pending_burst_base += size;
 +            _this->pending_burst_data += size;
@@ -1572,6 +1571,27 @@ index 9192ccd..08e15ad 100644
 +            if (_this->pending_burst_size == 0)
 +            {
 +                _this->pending_bursts.pop();
++            }
+ 
+-    if (!_this->response_queue.empty())
+-    {
+-        _this->handle_response((vp::IoReq *)_this->response_queue.pop());
+-    }
++            // Collectives are selected in cluster coordinates (see Router::collective_analyze), so
++            // they only ever make sense towards an interior node. An edge node (HBM / off-chip)
++            // means the collective tag is bogus, and flooding it would deliver the target-relative
++            // offset into every cluster's L1. Report it and route the request normally instead.
++            if (collective_type &&
++                (entry->x < 1 || entry->x > _this->noc->dim_x - 2 ||
++                 entry->y < 1 || entry->y > _this->noc->dim_y - 2))
++            {
++                _this->trace.force_warning(
++                    "Collective burst targets a non-cluster node, ignoring collective "
++                    "(type: %d, base: 0x%llx, size: 0x%x, destination: (%d, %d))\n",
++                    collective_type, base, size, entry->x, entry->y);
++                *req->arg_get(FlooNoc::REQ_COLL_TYPE) = (void *)0;
++                *req->arg_get(FlooNoc::REQ_ROW_MASK) = (void *)0;
++                *req->arg_get(FlooNoc::REQ_COL_MASK) = (void *)0;
 +            }
  
 -    if (_this->routers_stalled && !_this->target_stalled)

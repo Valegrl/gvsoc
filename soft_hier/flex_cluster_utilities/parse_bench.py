@@ -14,6 +14,17 @@ Every core writes CSR_TRACE around each region, so a run produces one line per
     ./parse_bench.py log_bench.log --app main.c --csv out.csv
     ./parse_bench.py log_bench.log --raw        # no labels, just region indices
     ./parse_bench.py log_bench.log --app main.c --plot_ctt   # and the stage figure
+    ./parse_bench.py celere.log --app celere.c --celere      # the celere generator
+
+Two generators emit apps this reads, and they lay out their stages differently,
+so each gets a model of its own -- AppModel for cevit_pipeline.py and CelereApp
+for celere_pipeline.py.  --cevit and --celere pick one; without either, the
+flavour is detected from the tables the app source declares, so existing command
+lines keep working unchanged.  --celere also tolerates a PARTIAL log: a run that
+hung, was killed, or is still going ends mid-stage, and its last clusters hold a
+prefix of their region table rather than all of it.  Those are labelled as far
+as they got and named in a note, instead of being dropped to raw -- their
+missing regions are simply absent, so their totals are lower bounds.
 
 The log carries no semantics -- a [BENCH] record identifies its region only by a
 numeric index -- so the kernel names, transfer sizes and GEMM shapes are read out
@@ -39,22 +50,26 @@ BENCH_RE = re.compile(
 )
 CLUSTER_RE = re.compile(r"^/chip/(cluster_\d+)/")
 
+
+def cluster_id(name):
+    """-> the N of 'cluster_N'.
+
+    Also the sort key everywhere clusters are listed: the names sort as strings
+    otherwise, which puts cluster_10 ahead of cluster_2 and scatters a stage's
+    blocks through the report -- a 14-cluster run reads as if the stages had
+    been mis-assigned when only the ordering is wrong.
+    """
+    return int(name.split("_")[1])
+
 # --------------------------------------------------------------------------
 # The app model
 #
-# The log carries no semantics: a [BENCH] record identifies its region only by a
-# numeric index.  Everything else -- which kernel ran, what shape it was, how
-# many bytes a DMA moved -- lives in the generated app, so that is what we read.
-# cevit_pipeline.py emits one statement per line with a trailing comment naming
-# the layer, which makes the file straightforward to walk.
+# A [BENCH] record names its region only by index, so kernel, shape and DMA size
+# are read out of the generated app instead.  Each stage yields two region
+# sequences: the DM core's (compute + DMAs) and the worker cores' (compute only).
 #
-# Two region sequences come out of each stage, because a core's region counter
-# only advances for regions *that core* entered: the DM core runs the DMAs on
-# top of the compute, the other cores run only the compute.
-#
-# The labels built here are the contract with work_model() below: '(N B)' sizes
-# a DMA, 'MxNxK' sizes a GEMM, '(N el)' sizes an elementwise kernel, and
-# dma_link() reads 'HBM' / '-> stage' out of a DMA label to pick the link.
+# Label format is the contract with work_model(): '(N B)' sizes a DMA, 'MxNxK' a
+# GEMM, '(N el)' an elementwise kernel; dma_link() reads the link out of it.
 # --------------------------------------------------------------------------
 
 COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
@@ -66,41 +81,40 @@ STAGE_TITLE_RE = re.compile(r"^/\* stage (\d+) : (.*?) \*/", re.M)
 COMPUTE_FN_RE = re.compile(
     r"^static inline void compute_stage_(\d+)\([^)]*\)\s*\n\{(.*?)^\}", re.M | re.S)
 # The DMA helpers the generator emits, newest spelling first.  Each brackets
-# itself with start/stop_benchmark, so every CALL is a region -- including the
-# four that a transpose issues from inside its loop.  dma_1d() is the older
-# generator's contiguous helper, kept so its logs still parse.
+# itself, so every CALL is a region.  dma_1d() is the older generator's
+# contiguous helper, kept so its logs still parse.
 DMA_CALLS = ("dma_2d_strided", "dma_2d", "dma_1d")
 # "Skip Sum [add]: Y += X" -> ("Skip Sum", "add")
 COMMENT_NAME_RE = re.compile(r"^(.*?)\s*\[(\w+)\]")
+# Matches the whole off-chip helper family: hbm_addr() for the default edge,
+# hbm_<edge>() for a specific one.  A call using any of them is an LPDDR leg,
+# not a cluster-local layout copy.
+HBM_CALL_RE = re.compile(r"\bhbm_\w*\s*\(")
 
-# One entry per baremetal kernel the generator can emit: how to pull its
-# problem size out of the call, and how to spell the label work_model() wants.
-#
-# A buffer operand is a bare name in the blocking app (X_BUF) and a subscript in
-# the compute-while-transfer one (X_BUF[buf]), so match both -- anything up to
-# the comma that separates it from the next argument.
+# One entry per baremetal kernel the generator can emit: how to pull its problem
+# size out of the call, and how to spell the label work_model() wants.  A buffer
+# operand is X_BUF or X_BUF[buf], so B matches anything up to the next comma.
 B = r"[^,]+"
 KERNEL_SPECS = [
     (re.compile(rf"redmule_synch_parallel\(\s*{B},\s*{B},\s*{B},\s*"
                 r"(\d+)u?,\s*(\d+)u?,\s*(\d+)u?"),
-     lambda n, g: f"GEMM {n} {g[0]}x{g[1]}x{g[2]} (RedMulE)"),
+     lambda n, g, t: f"GEMM {n} {g[0]}x{g[1]}x{g[2]} (RedMulE)"),
     (re.compile(rf"layernorm_parallel_2x4_f16vec\(\s*{B},\s*{B},\s*(\d+)u?,\s*(\d+)u?"),
-     lambda n, g: f"NORM {n} {g[0]}x{g[1]}"),
+     lambda n, g, t: f"NORM {n} {g[0]}x{g[1]}"),
     (re.compile(rf"softmax_parallel_2x4_f16vec\(\s*{B},\s*{B},\s*(\d+)u?,\s*(\d+)u?"),
-     lambda n, g: f"SMAX {n} {g[0]}x{g[1]}"),
+     lambda n, g, t: f"SMAX {n} {g[0]}x{g[1]}"),
     (re.compile(rf"axpy_f16vecp_local_unrolled4\({B},\s*{B},\s*{B},\s*(\d+)u?"),
-     lambda n, g: f"AXPY {n} ({g[0]} el)"),
+     lambda n, g, t: f"AXPY {n} ({g[0]} el)"),
     (re.compile(rf"gelu_f16\(\s*{B},\s*(\d+)u?"),
-     lambda n, g: f"GELU {n} ({g[0]} el)"),
+     lambda n, g, t: f"GELU {n} ({g[0]} el)"),
     (re.compile(rf"relu_f16\(\s*{B},\s*(\d+)u?"),
-     lambda n, g: f"RELU {n} ({g[0]} el)"),
+     lambda n, g, t: f"RELU {n} ({g[0]} el)"),
     # patchify_f16(src, dst, Nf, Nt, C, Nh, Nw, cid, nt) and its inverse.  The
-    # label carries the shape the kernel actually walks -- R output rows of
-    # Nh*Nw elements -- since that is what reshape_work() costs; the grid dims
-    # are only how the app spells it.
+    # label carries the shape the kernel walks (R rows of Nh*Nw), not the grid
+    # dims, since that is what reshape_work() costs.
     (re.compile(rf"(un)?patchify_f16\(\s*{B},\s*{B},\s*"
                 r"(\d+)u?,\s*(\d+)u?,\s*(\d+)u?,\s*(\d+)u?,\s*(\d+)u?"),
-     lambda n, g: reshape_label(n, g)),
+     lambda n, g, t: reshape_label(n, g)),
 ]
 
 
@@ -117,10 +131,22 @@ def reshape_label(name, g):
     return f"RSHP {name} {rows}x{nh * nw} ({'unpatchify' if g[0] else 'patchify'})"
 
 
+def _comment_parts(text):
+    """-> (name, tag) of a trailing comment: 'Skip Sum [add]: ...' -> ('Skip Sum', 'add').
+
+    The tag is the generator's own name for the kernel class, so it -- not the
+    C function that happens to implement the region -- is what a label should
+    lead with.  It matters for the stand-ins: several unrelated kernels are
+    emitted as the same mempool_wait(), and only the tag tells them apart.
+    Returns tag None when the comment carries no bracket.
+    """
+    m = COMMENT_NAME_RE.match(text)
+    return (m.group(1), m.group(2)) if m else (text, None)
+
+
 def _comment_name(text):
     """-> the human part of a trailing comment ('Skip Sum [add]: ...' -> 'Skip Sum')."""
-    m = COMMENT_NAME_RE.match(text)
-    return m.group(1) if m else text
+    return _comment_parts(text)[0]
 
 
 def _uint(arg):
@@ -177,6 +203,9 @@ def dma_bytes(fn, args):
 class AppModel:
     """The region layout of one generated app, read from its main.c."""
 
+    flavour = "cevit"           # names the default plot directory and file stem
+    plot_tag = "CEViT"
+
     def __init__(self, path):
         self.path = path
         src = Path(path).read_text()
@@ -191,12 +220,9 @@ class AppModel:
         self.lanes = self._array(bare, "STAGE_LANES")
         self.dout = self._array(bare, "STAGE_DOUT_BYTES")
 
-        # The compute-while-transfer app overlaps the hand-off with the compute:
-        # the dm core *issues* the outbound DMA (dma_1d_issue / push_to_next_issue,
-        # no benchmark bracket), computes alongside it, then drains it.  So the
-        # hand-off leaves no region in the log at all and must not be modelled --
-        # counting it would shift every region index of the dm core by one.  The
-        # blocking app calls push_to_next(), which brackets each transfer.
+        # In the compute-while-transfer app the dm core issues the outbound DMA
+        # unbracketed and drains it later, so the hand-off leaves no region in the
+        # log and must not be modelled.  The blocking app brackets each transfer.
         self.overlapped = "push_to_next_issue" in bare
 
         self.titles = {int(m.group(1)): m.group(2)
@@ -238,8 +264,13 @@ class AppModel:
         return out
 
     @staticmethod
-    def _region_of(line, ctx, dm):
-        """-> [(label, dm_only)] if this statement is a bracketed region, else []."""
+    def _region_of(line, ctx, dm, specs=None):
+        """-> [(label, dm_only)] if this statement is a bracketed region, else [].
+
+        `specs` selects the kernel table; the default is the cevit one, and
+        CelereApp passes its own superset.
+        """
+        specs = KERNEL_SPECS if specs is None else specs
         own = re.search(r"/\*\s*(.*?)\s*\*/", line)
         for fn in DMA_CALLS:
             args = call_args(line, fn)
@@ -251,20 +282,27 @@ class AppModel:
             ctx["comment"] = None
             nbytes = dma_bytes(fn, args)
             size = "" if nbytes is None else f", {nbytes} B"
-            # A layout copy stays inside the cluster: L1 -> L1.
+            # A layout copy stays inside the cluster (L1 -> L1); a call naming an
+            # hbm_*() window is an LPDDR leg, which dma_link() must see as one.
+            kind = "layout copy"
+            if HBM_CALL_RE.search(args[0]):
+                kind = "L1 -> LPDDR"
+            elif len(args) > 1 and HBM_CALL_RE.search(args[1]):
+                kind = "LPDDR -> L1"
             return [(f"DMA  {_comment_name(text) if text else 'copy'} "
-                     f"(layout copy{size})", dm)]
+                     f"({kind}{size})", dm)]
         if not own:
             return []
-        for rx, mk in KERNEL_SPECS:
+        for rx, mk in specs:
             k = rx.search(line)
             if k:
                 ctx["comment"] = None
-                return [(mk(_comment_name(own.group(1)), k.groups()), dm)]
+                name, tag = _comment_parts(own.group(1))
+                return [(mk(name, k.groups(), tag), dm)]
         return []
 
     @staticmethod
-    def _scan(lines, i, dm, ctx):
+    def _scan(lines, i, dm, ctx, specs=None):
         """-> ([(label, dm_only), ...], index past the block that starts at i).
 
         Walks the block structure rather than the lines, for two reasons: a
@@ -294,10 +332,10 @@ class AppModel:
             # the guard covers this statement or block only, never its siblings
             dm_here = dm or "flex_is_dm_core" in bare
             if bare.endswith("{"):
-                body, i = AppModel._scan(lines, i, dm_here, ctx)
+                body, i = AppModel._scan(lines, i, dm_here, ctx, specs)
                 out.extend(body * trips)
                 continue
-            out.extend(AppModel._region_of(line, ctx, dm_here))
+            out.extend(AppModel._region_of(line, ctx, dm_here, specs))
         return out, i
 
     @staticmethod
@@ -381,6 +419,285 @@ class AppModel:
         return stage["name"] if stage else "?"
 
 
+# --------------------------------------------------------------------------
+# The celere app model
+#
+# celere_pipeline.py emits a different app shape from cevit_pipeline.py:
+#
+#   * stages numbered 1..N_STAGES (slot 0 of every table is dead), not from 0;
+#   * compute_stage_N() is noinline, not `static inline void`;
+#   * the hand-off is a table walk over STAGE_XFER, whose mode and the two
+#     stages' lane counts set how many bracketed DMAs a stage issues;
+#   * off-chip legs come from LPDDR_IN_XFER / LPDDR_OUT_XFER, one bracketed DMA
+#     per entry; either range may be empty for a stage;
+#   * a tiled last stage (STAGE_TILES > 1) drains itself and main() issues no
+#     push for it.
+#
+# All of these DMAs bracket themselves, so the DM core's region indices run
+# ahead of the worker cores' -- hence the dm/worker split in the region tables.
+# --------------------------------------------------------------------------
+
+CELERE_COMPUTE_FN_RE = re.compile(
+    r"^static\s+void\s+__attribute__\(\(noinline\)\)\s+compute_stage_(\d+)\s*"
+    r"\([^)]*\)\s*\n\{(.*?)^\}", re.M | re.S)
+# `{ 1122304u, 4096u, XF_STRIDED }` -- two counts and a symbolic mode.
+CELERE_XFER_RE = re.compile(r"\{\s*(\d+)u?\s*,\s*(\d+)u?\s*,\s*(XF_\w+)\s*\}")
+# The lpddr_xfer_t rows are all numeric: lpddr_off, l1_off, lane_step, chunk,
+# lpddr_stride, l1_stride, reps.
+CELERE_LPDDR_RE = re.compile(r"\{([^}]*)\}")
+# permute_PN_f16's own comment sizes it: "105216 blocks x 8 elements".
+CELERE_PERM_SIZE_RE = re.compile(r"(\d+)\s+blocks\s+x\s+(\d+)\s+elements")
+CELERE_PERM_FN_RE = re.compile(
+    r"^static void (permute_\w+)\([^)]*\)[^{]*\{(.*?)^\}", re.M | re.S)
+
+XF_CONTIG, XF_STRIDED, XF_RESPLIT = "XF_CONTIG", "XF_STRIDED", "XF_RESPLIT"
+
+# celere's extra kernels, on top of the ones both generators share.
+#
+# The FFT and rope stand-ins are unscored: work_model() returns None and the row
+# prints '-' rather than invent a peak.  The permutations ARE scored -- they are
+# arithmetic-free load/store loops, so they reuse reshape_work() via RSHP.
+CELERE_KERNEL_SPECS = KERNEL_SPECS + [
+    # mempool_radix4_cfft_f16p(...).  Deliberately unsized: the kernel's header
+    # is not in this tree, so its argument order is not established here -- and
+    # the region is unscored either way.
+    (re.compile(r"mempool_radix4_cfft_f16p\("), lambda n, g, t: f"FFT  {n}"),
+    # mempool_wait(6012UL) -- a stand-in for a kernel that does not exist.  It
+    # covers several (the FFTs and rope), so the label leads with the comment's
+    # own [tag], not the call, to keep them as separate legend classes.
+    (re.compile(r"mempool_wait\(\s*(\d+)[uUlL]*\s*\)"),
+     lambda n, g, t: f"{_stand_in_label(n, t)} ({g[0]} cyc stand-in)"),
+]
+
+
+def _stand_in_label(name, tag):
+    """-> 'FFT on dim i_2' / 'ROPE Rotate feature pairs ...' for a mempool_wait region.
+
+    region_class() reads the class off the label's FIRST word, so the tag has to
+    lead -- except where the name already opens with it ('FFT on dim i_2 [fft]'),
+    which would otherwise print 'FFT FFT on dim i_2'.  'IFFT' is deliberately not
+    treated as already-led: an inverse transform belongs in the FFT class, and
+    prefixing is what puts it there.
+    """
+    cls = (tag or "wait").upper()
+    head = name.split(None, 1)[0] if name.split() else ""
+    return name if head.upper() == cls else f"{cls} {name}"
+
+
+def _celere_short(name):
+    """'P1[fftshift + box grouping]' -> 'P1'.
+
+    _comment_name() peels a trailing '[tag]' of a single word, which is how the
+    compute kernels spell themselves ('FFT on dim i_2 [fft]').  The
+    permutations put a whole phrase in the bracket instead, so it survives that
+    and has to come off here to keep the label to a readable width.
+    """
+    return name.split("[", 1)[0].strip() or name
+
+
+class CelereApp:
+    """The region layout of one generated celere app, read from its .c."""
+
+    overlapped = False          # every hand-off is bracketed; see the note above
+    flavour = "celere"          # names the default plot directory and file stem
+    plot_tag = "CELERE"
+
+    def __init__(self, path):
+        self.path = path
+        src = Path(path).read_text()
+        bare = COMMENT_RE.sub(" ", src)
+
+        d = {m.group(1): int(m.group(2)) for m in DEFINE_RE.finditer(bare)}
+        self.defines = d
+        self.n_stages = d["N_STAGES"]
+        self.n_iter = d.get("N_ITER", 1)
+
+        self.cid_stage = AppModel._array(bare, "CID_STAGE")
+        self.cid_lane = AppModel._array(bare, "CID_LANE")
+        self.lanes = AppModel._array(bare, "STAGE_LANES")
+        self.tiles = AppModel._array(bare, "STAGE_TILES")
+        self.xfer_first = AppModel._array(bare, "STAGE_XFER_FIRST")
+        self.in_first = AppModel._array(bare, "LPDDR_IN_FIRST")
+        self.out_first = AppModel._array(bare, "LPDDR_OUT_FIRST")
+        self.xfer = self._xfer_table(bare)
+        self.lpddr_in = self._lpddr_table(bare, "LPDDR_IN_XFER")
+        self.lpddr_out = self._lpddr_table(bare, "LPDDR_OUT_XFER")
+
+        # The kernel table gains one entry per permutation the app carries, each
+        # closing over the size read out of that function's own comment.
+        specs = list(CELERE_KERNEL_SPECS)
+        for name, rows, cols in self._permutes(src):
+            specs.append((re.compile(rf"\b{name}\("),
+                          lambda n, g, t, r=rows, c=cols:
+                              f"RSHP {_celere_short(n)} {r}x{c}"))
+        self.specs = specs
+
+        self.titles = {int(m.group(1)): m.group(2)
+                       for m in STAGE_TITLE_RE.finditer(src)}
+        # Sizes reach the DMA helpers as #defines (TILE_OUT_BYTES), and
+        # dma_bytes() only reads literals, so fold them in before scanning.
+        expanded = self._expand_defines(src, d)
+        self.bodies = {int(m.group(1)): self._body(m.group(2), specs)
+                       for m in CELERE_COMPUTE_FN_RE.finditer(expanded)}
+
+        self.stages = {}
+        for sid in range(1, self.n_stages + 1):
+            dm, worker = self._stage_regions(sid)
+            self.stages[sid] = {"name": self.titles.get(sid, "?"),
+                                "dm": dm, "worker": worker}
+
+    # -- source tables ----------------------------------------------------
+
+    @staticmethod
+    def _expand_defines(src, d):
+        """Substitute the integer #defines so the size regexes see literals."""
+        if not d:
+            return src
+        rx = re.compile(r"\b(" + "|".join(map(re.escape, sorted(d, key=len,
+                                                                reverse=True)))
+                        + r")\b")
+        return rx.sub(lambda m: str(d[m.group(1)]), src)
+
+    @staticmethod
+    def _xfer_table(bare):
+        m = re.search(r"STAGE_XFER\s*\[[^\]]*\]\s*=\s*\{(.*?)\n\}", bare, re.S)
+        if not m:
+            raise ValueError("no STAGE_XFER[] in app source")
+        return [(int(a), int(b), mode)
+                for a, b, mode in CELERE_XFER_RE.findall(m.group(1))]
+
+    @staticmethod
+    def _lpddr_table(bare, name):
+        """-> [bytes_moved, ...], one entry per lpddr_xfer_t row (chunk * reps)."""
+        m = re.search(rf"{name}\s*\[[^\]]*\]\s*=\s*\{{(.*?)\n\}}", bare, re.S)
+        if not m:
+            return []
+        out = []
+        for row in CELERE_LPDDR_RE.findall(m.group(1)):
+            vals = [int(x) for x in re.findall(r"(\d+)u?", row)]
+            if len(vals) >= 7:
+                out.append(vals[3] * vals[6])       # chunk * reps
+        return out
+
+    @staticmethod
+    def _permutes(src):
+        """-> [(fn_name, blocks, elems_per_block), ...] for the app's permutations."""
+        out = []
+        for m in CELERE_PERM_FN_RE.finditer(src):
+            size = CELERE_PERM_SIZE_RE.search(m.group(2))
+            if size:
+                out.append((m.group(1), int(size.group(1)), int(size.group(2))))
+        return out
+
+    # -- region tables ----------------------------------------------------
+
+    @staticmethod
+    def _fuse_bare_guards(lines):
+        """Fold `if (flex_is_dm_core())` into the single statement it guards.
+
+        AppModel._scan() only carries the guard into a following `{` block, so
+        the braceless form celere uses for its tile drain would otherwise lose
+        the dm-only marking and give the worker cores a region they never ran.
+        """
+        out, i = [], 0
+        while i < len(lines):
+            bare = COMMENT_RE.sub(" ", lines[i]).strip()
+            if (re.fullmatch(r"if\s*\(\s*flex_is_dm_core\s*\(\s*\)\s*\)", bare)
+                    and i + 1 < len(lines)):
+                out.append(f"{lines[i]} {lines[i + 1]}")
+                i += 2
+            else:
+                out.append(lines[i])
+                i += 1
+        return out
+
+    @staticmethod
+    def _body(text, specs):
+        lines = CelereApp._fuse_bare_guards(AppModel._logical_lines(text))
+        regions, _ = AppModel._scan(lines, 0, False, {"comment": None}, specs)
+        return regions
+
+    def _lpddr_regions(self, sid, table, first, arrow, what):
+        if sid + 1 >= len(first):
+            return []
+        return [f"DMA  {arrow} ({what}, {table[e]} B)"
+                for e in range(first[sid], min(first[sid + 1], len(table)))]
+
+    def _handoff_regions(self, sid):
+        """The bracketed DMAs push_to_next() issues for stage sid.
+
+        Mirrors push_to_next() exactly: one region per dma_2d/dma_2d_strided
+        call it makes, in the order it makes them.  main() skips the push for
+        the last stage and for any tiled stage, which drains itself.
+        """
+        if sid >= self.n_stages or self.tiles[sid] != 1:
+            return []
+        lanes, lanes_nx = self.lanes[sid], self.lanes[sid + 1]
+        out = []
+        for e in range(self.xfer_first[sid], self.xfer_first[sid + 1]):
+            nbytes, row_bytes, mode = self.xfer[e]
+            own_src = nbytes // lanes
+            own_dst = nbytes // lanes_nx
+            if mode == XF_RESPLIT:
+                # this lane sends slice k to lane k: lanes_nx transfers of an
+                # equal share of what this cluster holds
+                out += [f"DMA  resplit -> stage {sid + 1} lane {k} "
+                        f"({own_src // lanes_nx} B)" for k in range(lanes_nx)]
+            elif lanes == 1 and lanes_nx > 1:
+                out += [f"DMA  scatter -> stage {sid + 1} lane {k} ({own_dst} B)"
+                        for k in range(lanes_nx)]
+            elif lanes > 1 and lanes_nx == 1:
+                out.append(f"DMA  gather -> stage {sid + 1} ({own_src} B)")
+            else:
+                out.append(f"DMA  push -> stage {sid + 1} ({own_src} B)")
+        return out
+
+    def _stage_regions(self, sid):
+        dm, worker = [], []
+        dm += self._lpddr_regions(sid, self.lpddr_in, self.in_first,
+                                  "LPDDR -> L1", "stage input")
+        for label, dm_only in self.bodies.get(sid, []):
+            dm.append(label)
+            if not dm_only:
+                worker.append(label)
+        dm += self._lpddr_regions(sid, self.lpddr_out, self.out_first,
+                                  "L1 -> LPDDR", "stage output")
+        dm += self._handoff_regions(sid)
+        return AppModel._disambiguate(dm), AppModel._disambiguate(worker)
+
+    # -- the interface build()/report()/the plots use ----------------------
+
+    def stage_of(self, cid):
+        return self.cid_stage[cid] if cid < len(self.cid_stage) else None
+
+    def table_for(self, cid):
+        return self.stages.get(self.stage_of(cid))
+
+    def title_of(self, cid):
+        stage = self.stages.get(self.stage_of(cid))
+        return stage["name"] if stage else "?"
+
+    def handoff_label(self, sid):
+        """Only add_handoff_regions() wants this, and it never runs for celere
+        (every hand-off is bracketed, so overlapped is False)."""
+        return f"DMA  push -> stage {sid + 1}"
+
+
+def detect_flavour(path):
+    """-> 'celere' / 'cevit' / None, from the tables the app source declares.
+
+    The two generators lay out different tables, and either marker alone settles
+    it.  A file carrying neither (or both) returns None so the caller can ask
+    for the flag rather than guess and fail somewhere less obvious.
+    """
+    src = COMMENT_RE.sub(" ", Path(path).read_text())
+    celere = "STAGE_XFER_FIRST" in src or "lpddr_pull" in src
+    cevit = "STAGE_DOUT_BYTES" in src or "CLUSTER_0_DIN_BYTES" in src
+    if celere == cevit:
+        return None
+    return "celere" if celere else "cevit"
+
+
 class NoApp:
     """--raw, or no app given: every region falls back to its bare index."""
 
@@ -401,29 +718,19 @@ class NoApp:
 #
 #     uti = achieved OP/cyc / peak OP/cyc = ops / (peak_ops * span)
 #
-# An "OP" is one MAC for the TE, one 2-lane f16 vector FP instruction for the
-# PE and one halfword access for the LSU, so uti is each unit's occupancy
-# against its own op-issue peak.  Note the OP definitions differ: uti is
-# comparable across units as a percentage, but the raw OP/cyc columns are not
-# additive.  Only the TE and PE have a FLOP reading; the LSU does no arithmetic.
+# An "OP" is one MAC for the TE, one 2-lane f16 vector FP instruction for the PE
+# and one halfword access for the LSU.  uti is comparable across units as a
+# percentage, but the raw OP/cyc columns are not additive.  Only the TE and PE
+# have a FLOP reading.
 #
-# This is the same ratio the RedMulE model prints for itself
-# (light_redmule.cpp:1328, ideal_runtime / measured_cycles), so a TE row can be
-# checked directly against a `make runv` trace.
-#
-# uti is also the FLOP utilization, not just an occupancy proxy.  Both units
-# carry the same factor of 2 from op to FLOP -- a TE MAC is 2 FLOPs, a PE
-# vector op is 2 f16 lanes -- so it cancels:
-#     TE:  2*MACs / (2*4096*span) = MACs/(4096*span) = uti
-#     PE:  2*ops  / (2* 256*span) = ops /( 256*span) = uti
-# Hence one column suffices; only the absolute FLOP/s rate is reported too.
+# uti doubles as FLOP utilization: the op->FLOP factor of 2 is the same for both
+# units and cancels.  A TE row matches the ratio light_redmule.cpp prints, so it
+# can be checked against a `make runv` trace.
 # --------------------------------------------------------------------------
 
-# TE: nb_redmule_tiles x (redmule_height x redmule_width) MACs per cycle,
-# from configs/arch_tensorpool.py.  light_redmule.cpp:370 defines one engine's
-# ideal runtime as M*N*K / (ce_height*ce_width); the 16 engines run concurrently
-# on 1/16 of the GEMM each (confirmed against a RedMulE trace: uti = 0.264 for
-# the 688x128x84 Out Proj).
+# TE: nb_redmule_tiles x (redmule_height x redmule_width) MACs per cycle, from
+# configs/arch_tensorpool.py.  The 16 engines run concurrently on 1/16 of the
+# GEMM each.
 RM_TILES, RM_H, RM_W = 16, 8, 32
 TE_MAC_PER_CYC = RM_TILES * RM_H * RM_W         # 4096 MAC/cyc per cluster
 
@@ -431,21 +738,14 @@ TE_MAC_PER_CYC = RM_TILES * RM_H * RM_W         # 4096 MAC/cyc per cluster
 N_CORES = 256
 PE_OPS_PER_CYC = N_CORES                        # 256 vecop/cyc per cluster
 
-# LSU: the patch permutation kernels do no arithmetic at all -- their inner loop
-# is scalar halfword loads and stores (p.lh / sh, and the mirror image for
-# unpatchify), one memory instruction per element moved, and the grid-side
-# strides are not unit so there is nothing to vectorise.  Rating them against an
-# FP peak would be meaningless, so they get a unit of their own: one load/store
-# issue slot per core per cycle.  An "OP" here is one halfword access, hence
-# 2 bytes; there is no FLOP figure for this unit and none is printed.
+# LSU: the patch permutation kernels do no arithmetic -- scalar halfword loads
+# and stores, nothing vectorisable -- so they get a unit of their own: one
+# load/store issue slot per core per cycle.  An "OP" is one halfword access
+# (2 bytes); this unit has no FLOP figure.
 LSU_OPS_PER_CYC = N_CORES                       # 256 halfword access/cyc
 LSU_BYTES_PER_OP = 2                            # a halfword
-# Moving one element is a load and a store -- the two sides of the permutation.
-# One of the pair is the post-incrementing Xpulp form (p.lh on the strided side
-# of patchify, p.sh on the strided side of unpatchify) and the other a plain
-# immediate-offset lh / sh, so the direction does not change the count: both
-# kernels issue exactly two memory instructions per element and no address
-# update of their own.
+# Moving one element is a load and a store, so both kernels issue exactly two
+# memory instructions per element regardless of direction.
 LSU_OPS_PER_ELEM = 2
 
 # The clock domain is 1 GHz (flex_cluster.py:339), so 1 cycle == 1 ns and
@@ -460,22 +760,18 @@ PEAK_GFLOPS = {
     "PE": PE_OPS_PER_CYC * 2 * 2 * CLOCK_GHZ,           # 1024
 }
 
-# Achieved FLOPs are reported as a floor: every vector op is credited with its
-# two f16 lanes, so an op that is a vfmac.h (4 FLOPs) counts half.  Kernels made
-# of vfmac -- axpy is all of them, gelu 12 of 44 -- therefore read low.  The uti
-# column is unaffected: it is issue-slot occupancy, not FLOPs.
+# Achieved FLOPs are a floor: every vector op counts 2 lanes, so a vfmac.h
+# (4 FLOPs) counts half and vfmac-heavy kernels read low.  uti is unaffected --
+# it is issue-slot occupancy, not FLOPs.
 FLOP_PER_OP = 2
 
-# The bank-interleaved elementwise kernels (axpy, gelu) all share one addressing
-# idiom, read off the disassembly of the app ELF:
+# The bank-interleaved elementwise kernels (axpy, gelu) share one addressing
+# idiom, read off the app ELF:
 #     i = 2*core_id*BANKING_FACTOR;  i < Len;  i += 2*NUM_BANKS
-# with 8 f16 elements handled per iteration.  The binary shows `mhartid << 4`
-# for the start and an 0x1000 stride, which pins BANKING_FACTOR = 8 and
-# NUM_BANKS = 256*8 = 2048 for this build.
+# with 8 f16 elements per iteration, which pins BANKING_FACTOR = 8.
 BANKING_FACTOR = 8
 BANKED_START = 2 * BANKING_FACTOR               # 16 elements per core offset
 BANKED_STRIDE = 2 * N_CORES * BANKING_FACTOR    # 4096 elements
-BANKED_ELEMS = 8                                # elements touched per iteration
 
 # --------------------------------------------------------------------------
 # DMA bandwidth model -- B/cycle
@@ -483,35 +779,62 @@ BANKED_ELEMS = 8                                # elements touched per iteration
 # A DMA region moves a known number of bytes (the region label carries the
 # count) over one of three paths, each with its own peak:
 #
-#   LPDDR off-chip main memory, DRAMSys LPDDR4 model              6.4 GB/s
+#   LPDDR off-chip main memory, per DRAMSys channel               from the log
 #   NoC   cluster to cluster over the 512-bit link
 #         (noc_link_width, arch_tensorpool.py:76)                 64  GB/s
 #   L1    cluster-local layout copy, L1 -> L1                     unmeasured
 #
-# The off-chip node is called "hbm" throughout the arch config and the app
-# labels (hbm_start_base, "DMA HBM -> L1"), but the memory behind it is the
-# LPDDR4 DRAMSys model -- hence the label match on HBM and the LPDDR naming.
+# The off-chip node is spelled "hbm" in the arch config and app labels whatever
+# DRAMSys model is behind it, so both spellings are matched.  Its peak is read
+# per run from the DRAMSys footer by dram_peak_from_log(); the constant below is
+# only the fallback for a log predating it, and --dram-peak overrides both.
 #
-# At 1 GHz a cycle is a ns, so B/cyc reads directly as GB/s and the same ratio
-# applies as for the compute units:
+# At 1 GHz a cycle is a ns, so B/cyc reads directly as GB/s:
 #     uti = bytes / (peak_B_per_cyc * span)
-# The L1 copies have no peak to divide by, so they report an achieved B/cyc
-# with no utilization.
+# L1 copies have no peak, so they report an achieved B/cyc with no utilization.
 # --------------------------------------------------------------------------
 
-LPDDR_PEAK_BPC = 6.4                            # B/cyc == GB/s at 1 GHz
+DRAM_PEAK_FALLBACK_BPC = 64.0                   # B/cyc == GB/s at 1 GHz
+DRAM_PEAK_BPC = DRAM_PEAK_FALLBACK_BPC           # main() replaces this per run
 NOC_PEAK_BPC = 64.0
 L1_PEAK_BPC = None                              # no figure for the local path
+
+# 'DRAMSysRecordable0.controller0  MAX BW:  512.00 Gb/s |  64.00 GB/s | 100.00 %'
+DRAM_MAX_BW_RE = re.compile(r"MAX BW:.*?\|\s*([\d.]+) GB/s")
 
 DMA_BYTES_RE = re.compile(r"(\d+) B\b")
 
 GEMM_SHAPE_RE = re.compile(r"(\d+)x(\d+)x(\d+)")
 
-# What work_model() returns: uti = ops / (peak_ops * span), and ideal is the
-# cycle count that implies, ops / peak_ops.  For a DMA an "op" is one byte, so
-# ops is the transfer size and peak_ops the link's B/cyc; ideal and ceiling are
-# None when the link has no known peak.
+# What work_model() returns: uti = ops / (peak_ops * span), ideal = ops/peak_ops.
+# For a DMA an "op" is one byte.  ideal and ceiling are None with no known peak.
 Work = namedtuple("Work", "kind ideal ceiling ops peak_ops")
+
+
+def set_dram_peak(override, seen):
+    """Fix the off-chip peak for this run, from --dram-peak or the log's footer.
+
+    `seen` is every distinct 'MAX BW ... GB/s' the DRAMSys footer printed, one
+    line per channel.  They are normally all the same figure; a run that mixes
+    memories would make a single peak meaningless, so that is reported rather
+    than averaged, and the largest is kept so the utilizations read as a floor.
+    """
+    global DRAM_PEAK_BPC
+    if override is not None:
+        DRAM_PEAK_BPC = override
+        return
+    if not seen:
+        DRAM_PEAK_BPC = DRAM_PEAK_FALLBACK_BPC
+        print(f"note: no DRAMSys footer in the log; assuming "
+              f"{DRAM_PEAK_BPC:g} B/cyc per off-chip channel "
+              f"(pass --dram-peak to set it)", file=sys.stderr)
+        return
+    if len(seen) > 1:
+        print(f"warning: DRAMSys channels report different peaks "
+              f"({', '.join(f'{p:g}' for p in sorted(seen))} GB/s); "
+              f"using the largest, so the off-chip utilizations are a floor",
+              file=sys.stderr)
+    DRAM_PEAK_BPC = max(seen)
 
 
 def dma_link(label):
@@ -520,8 +843,10 @@ def dma_link(label):
     Every row is one cluster's transfer over one link, so the peaks are the
     per-link ones: concurrent lanes are separate rows, never summed into one.
     """
-    if "HBM" in label:                          # off-chip, see above
-        return "LPDDR", LPDDR_PEAK_BPC
+    # 'HBM' is the cevit generator's spelling, 'LPDDR' the celere one; both name
+    # the same off-chip link.
+    if "HBM" in label or "LPDDR" in label:      # off-chip, see above
+        return "LPDDR", DRAM_PEAK_BPC
     if "-> stage" in label:                     # push / scatter / gather
         return "NoC", NOC_PEAK_BPC
     return "L1", L1_PEAK_BPC                    # reshape / transpose / split
@@ -637,10 +962,8 @@ def work_model(label):
         return pe_work(rows, cols, softmax_ops)
 
     if label.startswith("AXPY"):
-        # The app inlines axpy_f16vecp_local_unrolled4 (main+0x6b0 in the ELF:
-        # `mhartid << 4` start, 8 lw + 4 vfmac.h + 4 sw, 0x1000-byte stride),
-        # not the scalar axpy_f16p -- so it is bank-interleaved like gelu, with
-        # AXPYF16VEC_UNROLLED4_LOOP doing 4 vfmac.h per 8-element iteration.
+        # The app inlines axpy_f16vecp_local_unrolled4, not the scalar axpy_f16p,
+        # so it is bank-interleaved like gelu: 4 vfmac.h per 8-element iteration.
         return banked_work(int(re.search(r"(\d+) el", label).group(1)), 4)
 
     if label.startswith("GELU"):
@@ -713,11 +1036,20 @@ def find_dm_core(cores):
     return candidates[0] if len(candidates) == 1 else None
 
 
-def build(per_core, app):
-    """-> {cluster: [Region, ...]} ordered by first execution."""
-    out = {}
-    for cluster, cores in sorted(per_core.items()):
-        cid = int(cluster.split("_")[1])
+def build(per_core, app, partial_ok=False):
+    """-> ({cluster: [Region, ...]} ordered by first execution, {cluster: (ran, of)}).
+
+    The second value names the clusters that stopped early, and is empty unless
+    partial_ok.  A run that hangs -- or one read while it is still going -- ends
+    mid-stage, so the last clusters have a PREFIX of their region table rather
+    than all of it.  With partial_ok those are labelled as far as they got
+    instead of being dropped to raw, which is what makes a killed run readable;
+    without it the exact-length check stands, so an accidental app/log mismatch
+    still shows up as one.
+    """
+    out, incomplete = {}, {}
+    for cluster, cores in sorted(per_core.items(), key=lambda kv: cluster_id(kv[0])):
+        cid = cluster_id(cluster)
         table = app.table_for(cid)
         dm = find_dm_core(cores)
 
@@ -727,22 +1059,31 @@ def build(per_core, app):
         if table is not None:
             for hart, entries in cores.items():
                 role = "dm" if hart == dm else "worker"
-                if len(entries) != len(table[role]):
-                    print(f"warning: {cluster} hart {hart} ran {len(entries)} "
-                          f"regions, app has {len(table[role])} for a {role} core "
-                          f"-- falling back to raw for this cluster "
-                          f"(is this log from this app?)",
-                          file=sys.stderr)
-                    table = None
-                    break
+                want = len(table[role])
+                if len(entries) == want:
+                    continue
+                # A short core is a truncated run; a long one cannot be this app.
+                if partial_ok and len(entries) < want:
+                    ran = max(len(e) for e in cores.values())
+                    incomplete[cluster] = (ran, len(table["dm"]))
+                    continue
+                print(f"warning: {cluster} hart {hart} ran {len(entries)} "
+                      f"regions, app has {want} for a {role} core "
+                      f"-- falling back to raw for this cluster "
+                      f"(is this log from this app?)",
+                      file=sys.stderr)
+                table = None
+                break
 
         regions = {}
         for hart, entries in cores.items():
             role = "dm" if hart == dm else "worker"
             labels = table[role] if table else None
             for cycles, start, end, idx in sorted(entries, key=lambda e: e[3]):
-                if labels is not None:
+                if labels is not None and idx < len(labels):
                     key = labels[idx]
+                elif labels is not None:
+                    key = f"[{role}] region {idx} (past the app's table)"
                 else:
                     key = f"[{role}] region {idx}"
                 r = regions.get(key)
@@ -751,7 +1092,7 @@ def build(per_core, app):
                 r.add(cycles, start, end)
                 r.order = min(r.order, start)
         out[cluster] = sorted(regions.values(), key=lambda r: r.order)
-    return out
+    return out, incomplete
 
 
 def fmt_pct(x, width):
@@ -759,12 +1100,10 @@ def fmt_pct(x, width):
     return f"{'-':>{width}}" if x is None else f"{100.0 * x:>{width - 1}.1f}%"
 
 
-# A DMA cannot beat its link.  A row that does is not a fast transfer, it is a
-# region whose span is not the transfer's duration: the engine reported done
-# once the interconnect accepted the data, before it reached the far end.  This
-# is worth catching rather than printing, because the number looks like a
-# result -- a 116928 B store to LPDDR "at 54.7 B/cyc" was, on inspection of
-# DRAMSys' own counters, a transfer that never reached the DRAM at all.
+# A DMA cannot beat its link.  A row that does is a region whose span is not the
+# transfer's duration -- the engine reported done once the interconnect accepted
+# the data, before it reached the far end.  Flagged rather than printed plain,
+# because the number otherwise looks like a result.
 OVER_PEAK_MARK = "  <- over link peak"
 
 
@@ -787,10 +1126,9 @@ def rate_cells(w, span):
     peak = "?" if w.peak_ops is None else f"{w.peak_ops:g}"
     if w.kind.startswith("DMA"):
         return f"{'-':>8} {'-':>10} {rate:>7.1f} {peak:>9}"
-    # OP/cyc is an average over a region that is thousands of cycles long, so
-    # its fractional part is far below the resolution of anything it is
-    # compared against -- print it whole.  B/cyc keeps a decimal because the
-    # LPDDR peak itself is 6.4.
+    # OP/cyc prints whole (its fraction is below the resolution of anything it
+    # is compared against); B/cyc keeps a decimal, since an off-chip peak need
+    # not be a whole number of bytes per cycle.
     return f"{rate:>8.0f} {peak:>10} {'-':>7} {'-':>9}"
 
 
@@ -818,7 +1156,7 @@ def add_handoff_regions(clusters, app, total_ns):
     for cluster, regions in clusters.items():
         if not regions:
             continue
-        s = app.stage_of(int(cluster.split("_")[1]))
+        s = app.stage_of(cluster_id(cluster))
         if s is None:
             return
         lo = min(r.start for r in regions)
@@ -845,11 +1183,9 @@ def add_handoff_regions(clusters, app, total_ns):
             continue
         if end <= start:
             continue
-        # The step is delimited by a global barrier, so every lane of the stage
-        # enters and leaves it together -- the window is the stage's, not each
-        # cluster's own last region.  The lanes push concurrently over separate
-        # links, which is why they are separate rows of dout bytes each and not
-        # one row of their sum.
+        # A global barrier delimits the step, so the window is the stage's, not
+        # each cluster's own last region.  Lanes push concurrently over separate
+        # links, hence one row of dout bytes each rather than one of their sum.
         for cluster in stage_of[s]:
             r = Region(app.handoff_label(s), start)
             r.add(end - start, start, end)
@@ -880,8 +1216,12 @@ def report(clusters, total_ns, app):
     stage_span = {}
     impossible = []             # DMA rows whose span cannot be the transfer's
 
+    # The label column is sized to its content, with the historical widths as the
+    # floor: cevit labels fit in 46, celere's carry a whole layer description.
+    lw = max([46] + [len(r.label) for rs in clusters.values() for r in rs])
+
     for cluster, regions in clusters.items():
-        cid = int(cluster.split("_")[1])
+        cid = cluster_id(cluster)
         stage = app.stage_of(cid)
         title = app.title_of(cid)
         busy = sum(r.span for r in regions)
@@ -892,7 +1232,7 @@ def report(clusters, total_ns, app):
         print()
         print(f"=== {cluster}  (stage {stage}) -- {title}")
         print(f"    active {lo} -> {hi} cyc   sum of regions {busy} cyc")
-        print(f"    {'region':<46} {'cores':>5} {'span':>9} "
+        print(f"    {'region':<{lw}} {'cores':>5} {'span':>9} "
               f"{'unit':>9} {RATE_HEAD} {'uti':>7}")
         for r in regions:
             n = r.ncores
@@ -905,7 +1245,7 @@ def report(clusters, total_ns, app):
             bad = over_link_peak(w, r.span)
             if bad:
                 impossible.append((cluster, r.label, w.ops / r.span, w.peak_ops))
-            print(f"    {r.label:<46} {n:>5} {r.span:>9} {cells}"
+            print(f"    {r.label:<{lw}} {n:>5} {r.span:>9} {cells}"
                   f"{OVER_PEAK_MARK if bad else ''}")
             # DMAs are split by link -- the three paths are worth telling apart.
             kernel_totals[w.kind if w and w.kind.startswith("DMA")
@@ -918,7 +1258,7 @@ def report(clusters, total_ns, app):
     print("          store for the LSU and one byte moved for a DMA, so the percentages")
     print("          are comparable but the raw OP/cyc columns are not additive.")
     print("          DMA B/cyc reads as GB/s at 1 GHz.")
-    print(f"    {'kernel':<44}{'unit':>9} {'calls':>5} {'span':>8} "
+    print(f"    {'kernel':<{lw - 2}}{'unit':>9} {'calls':>5} {'span':>8} "
           f"{RATE_HEAD} {'uti':>7}")
     agg = {}
     for cluster, regions in clusters.items():
@@ -934,7 +1274,7 @@ def report(clusters, total_ns, app):
     for label, (w, calls, span, ideal, ops) in sorted(
             agg.items(), key=lambda kv: -kv[1][2]):
         agg_w = w._replace(ops=ops)
-        print(f"    {label:<44}{w.kind:>9} {calls:>5} {span:>8} "
+        print(f"    {label:<{lw - 2}}{w.kind:>9} {calls:>5} {span:>8} "
               f"{rate_cells(agg_w, span)} "
               f"{fmt_pct(None if w.ideal is None else ideal / span, 7)}"
               f"{OVER_PEAK_MARK if over_link_peak(agg_w, span) else ''}")
@@ -978,7 +1318,7 @@ def report(clusters, total_ns, app):
         print()
         print("=== over link peak -- these rows do NOT measure their transfer")
         for cluster, label, rate, peak in impossible:
-            print(f"    {cluster:<10} {label:<46} {rate:>7.1f} of {peak:g} B/cyc")
+            print(f"    {cluster:<10} {label:<{lw}} {rate:>7.1f} of {peak:g} B/cyc")
         print()
         print("    A DMA cannot beat its link, so the span of these regions is not how")
         print("    long the transfer took: the engine reported done once the")
@@ -1004,7 +1344,8 @@ def report(clusters, total_ns, app):
 
     print()
     print("=== pipeline")
-    for cluster, (lo, hi) in sorted(stage_span.items()):
+    for cluster, (lo, hi) in sorted(stage_span.items(),
+                                    key=lambda kv: cluster_id(kv[0])):
         regions = clusters[cluster]
         busy = sum(r.span for r in regions)
         print(f"    {cluster}: window {hi - lo:>7} cyc, busy {busy:>7} cyc "
@@ -1014,7 +1355,7 @@ def report(clusters, total_ns, app):
     # costs max(lane windows), not their sum.
     by_stage = defaultdict(list)
     for cluster, (lo, hi) in stage_span.items():
-        cid = int(cluster.split("_")[1])
+        cid = cluster_id(cluster)
         stage = app.stage_of(cid)
         by_stage[-1 if stage is None else stage].append((lo, hi))
     print()
@@ -1048,7 +1389,7 @@ def write_csv(clusters, path, app):
                     "bytes", "bytes_per_cyc", "peak_bytes_per_cyc",
                     "ideal_cyc", "uti", "ceiling"])
         for cluster, regions in clusters.items():
-            cid = int(cluster.split("_")[1])
+            cid = cluster_id(cluster)
             stage = app.stage_of(cid)
             stage = "" if stage is None else stage
             for i, r in enumerate(regions):
@@ -1078,24 +1419,17 @@ def write_csv(clusters, path, app):
 # --------------------------------------------------------------------------
 # Pipeline figure -- compute against transfer, per stage
 #
-# The same figure cevit_csv_plot.py draws from a written-out CSV, drawn here
-# straight from the regions in memory: one x slot per pipeline stage, the
-# clusters of a head-parallel stage side by side inside a shaded slot.  Each
-# region is charged to compute or transfer by the unit work_model() gives it:
+# One x slot per pipeline stage, the clusters of a head-parallel stage side by
+# side inside a shaded slot.  Each region is charged by the unit work_model()
+# gives it:
 #
 #   transfer -- DMA:NoC, DMA:LPDDR   (stage hand-offs and the HBM read/write)
 #   compute  -- everything else: TE, PE and the DMA:L1 layout copies
 #
-# which mirrors how cevit_pipeline.py costs the model: reshape/split/transpose
-# are local memcpys inside a cluster's compute, only the hand-off crosses a link.
-#
-# A lane's height is the SUM of its region spans -- exactly what the CSV route
-# can express, so the two agree number for number.  Each bar is then subdivided
-# into the regions that make it up, one segment per kernel and per DMA: one
-# figure that answers both "how much of this stage is transfer" and "which
-# kernels is the rest made of".  In CTT the segments run bottom to top in
-# EXECUTION order; CWT splits them over its two bars, so there they are grouped
-# by side and only ordered within each.
+# A lane's height is the SUM of its region spans, matching the CSV route number
+# for number.  Each bar is subdivided into its regions, one segment per kernel
+# and per DMA.  CTT orders segments bottom-to-top by execution; CWT splits them
+# over two bars, grouped by side and ordered only within each.
 # --------------------------------------------------------------------------
 
 TRANSFER_KINDS = ("DMA:NoC", "DMA:LPDDR")
@@ -1195,8 +1529,9 @@ def build_stages(clusters, app, cycles_per_ms):
     """-> [Stage, ...] from the same {cluster: [Region]} the report walks."""
     stages = {}
     unmodelled = set()
-    for cluster, regions in sorted(clusters.items()):
-        cid = int(cluster.split("_")[1])
+    for cluster, regions in sorted(clusters.items(),
+                                   key=lambda kv: cluster_id(kv[0])):
+        cid = cluster_id(cluster)
         sidx = app.stage_of(cid)
         if sidx is None:
             continue
@@ -1281,20 +1616,25 @@ def plot_cluster_split(label, stages, overlap, out_path, ymax):
                 side[l.cls] = l.transfer
     order, palette, fb = sorted(total, key=lambda c: -total[c]), {}, {True: 0, False: 0}
     for cls in order:
-        colour = LAYER_COLORS.get(cls)
-        if colour is None:                  # an app the palette has not met yet
-            pool = LAYER_FALLBACK[side[cls]]
-            colour = pool[fb[side[cls]] % len(pool)]
-            fb[side[cls]] += 1
-        palette[cls] = colour
+        if cls in LAYER_COLORS:
+            palette[cls] = LAYER_COLORS[cls]
+    # Then the ones the palette has not met, each taking the first colour of its
+    # side's pool nothing else on this figure uses.  Must run after every named
+    # class has claimed its colour: the pools share entries with LAYER_COLORS
+    # (RSHP and the first compute fallback are both #9467bd).
+    for cls in order:
+        if cls in palette:
+            continue
+        pool = LAYER_FALLBACK[side[cls]]
+        free = [c for c in pool if c not in set(palette.values())]
+        palette[cls] = free[0] if free else pool[fb[side[cls]] % len(pool)]
+        fb[side[cls]] += 1
     # the stage input is an off-chip read, so in the kernel panel it is an LPDDR
     # segment like any other
     din_colour = palette.get("DMA LPDDR", "green")
 
-    # Both panels share the y axis: the bars are the same heights in both, so the
-    # subdivision below lines up row for row with the split above.  The legends
-    # sit outside the axes -- the lower one is a row per kernel class, which no
-    # amount of headroom inside the plot would reliably clear.
+    # Both panels share the y axis, so the subdivision below lines up row for row
+    # with the split above.  Legends sit outside the axes.
     fig, (ax_top, ax_ker) = plt.subplots(
         2, 1, sharex=True, sharey=True,
         figsize=(max(5.0, 1.3 * n_phys + 2.5) + 2.6, 7.6))
@@ -1355,10 +1695,8 @@ def plot_cluster_split(label, stages, overlap, out_path, ymax):
                 ax_top.bar(xmid, lane.compute_ms, width=draw, color="red", zorder=2)
                 ax_top.bar(xmid, lane.transfer_ms, width=draw,
                            bottom=lane.compute_ms, color="green", zorder=2)
-                # CTT sums the two halves, so the bar's height does not depend on
-                # the order of its segments: stack them as the cluster ran them,
-                # which puts stage 0's inbound HBM read at the bottom where it
-                # happened instead of on top with the outbound transfers.
+                # CTT sums the two halves, so segment order does not change the
+                # bar height: stack them in execution order.
                 stack(ax_ker, xmid, lane.layers, 0.0, draw)
             # cluster id above its own bar(s), clear of the stage ticks below the axis
             for ax in (ax_top, ax_ker):
@@ -1445,13 +1783,16 @@ def print_pipeline_model(label, stages, overlap):
           f"({steps} steps x T_pipe, at regime)")
 
 
-def make_plots(clusters, app, args):
+def make_plots(clusters, app, args, incomplete=None):
     """Render whichever of --plot_ctt / --plot_cwt was asked for."""
     wanted = [(False, args.plot_ctt), (True, args.plot_cwt)]
     wanted = [(ov, path) for ov, path in wanted if path is not None]
     if not wanted:
         return
-    if not isinstance(app, AppModel):
+    # The test is for the ABSENCE of a stage layout, not for one particular
+    # model: AppModel and CelereApp both provide one, NoApp is the case that
+    # cannot be plotted.
+    if isinstance(app, NoApp):
         print("error: --plot_ctt/--plot_cwt need --app (and not --raw): without the "
               "app there is no stage layout to plot", file=sys.stderr)
         return
@@ -1460,6 +1801,11 @@ def make_plots(clusters, app, args):
     if not stages:
         print("error: no cluster mapped to a stage; nothing to plot", file=sys.stderr)
         return
+    if incomplete:
+        short = ", ".join(sorted(incomplete, key=cluster_id))
+        print(f"warning: the log is partial, so {short} contribute only the regions "
+              f"that ran; their stages are drawn shorter than they will be",
+              file=sys.stderr)
 
     log = Path(args.log)
     label = args.plot_label or log.stem
@@ -1471,7 +1817,8 @@ def make_plots(clusters, app, args):
                   f"hand-off; drawing it as asked", file=sys.stderr)
         print_pipeline_model(label, stages, overlap)
         out = (Path(path) if path else
-               log.parent / "cevit_bench_plots" / f"CEViT_{tag}_split_{log.stem}.png")
+               log.parent / f"{app.flavour}_bench_plots"
+               / f"{app.plot_tag}_{tag}_split_{log.stem}.png")
         try:
             plot_cluster_split(label, stages, overlap, out, args.ymax)
         except ImportError:
@@ -1490,6 +1837,22 @@ def main():
                          "region labels, transfer sizes and kernel shapes")
     ap.add_argument("--raw", action="store_true",
                     help="do not label regions, even if --app is given")
+    flavour = ap.add_mutually_exclusive_group()
+    flavour.add_argument("--cevit", dest="flavour", action="store_const",
+                         const="cevit",
+                         help="the --app file is a cevit_pipeline.py app "
+                              "(0-based stages, STAGE_DOUT_BYTES hand-offs)")
+    flavour.add_argument("--celere", dest="flavour", action="store_const",
+                         const="celere",
+                         help="the --app file is a celere_pipeline.py app "
+                              "(1-based stages, STAGE_XFER hand-offs, tiled last "
+                              "stage).  Also tolerates a partial log, so a run "
+                              "that hung or is still going still reports")
+    ap.set_defaults(flavour=None)       # default: detect from the app source
+    ap.add_argument("--partial", action="store_true",
+                    help="label clusters that stopped part-way through their "
+                         "region table instead of dropping them to raw "
+                         "(implied by --celere)")
     ap.add_argument("--csv", metavar="FILE", help="also write a CSV of the table")
     ap.add_argument("--plot_ctt", nargs="?", const="", metavar="PNG",
                     help="draw the compute-then-transfer figure (stacked bars): one "
@@ -1507,6 +1870,11 @@ def main():
                     help="title label for the figure (default: the log file stem)")
     ap.add_argument("--freq-hz", type=float, default=CLOCK_GHZ * 1e9, metavar="F",
                     help="clock frequency in Hz for cycles -> ms (default: 1e9)")
+    ap.add_argument("--dram-peak", type=float, metavar="BPC",
+                    help="peak bandwidth of ONE off-chip channel in B/cyc "
+                         "(== GB/s at 1 GHz).  Default: read from the DRAMSys "
+                         f"'MAX BW' footer in the log, else "
+                         f"{DRAM_PEAK_FALLBACK_BPC:g}")
     args = ap.parse_args()
 
     per_core, nbench = parse(args.log)
@@ -1521,8 +1889,19 @@ def main():
             print("no --app given: reporting raw region indices, no utilization",
                   file=sys.stderr)
     else:
-        app = AppModel(args.app)
-        print(f"app {args.app}: {app.n_stages} stages, "
+        seen = detect_flavour(args.app)
+        if args.flavour is None:
+            if seen is None:
+                print(f"error: cannot tell which generator emitted {args.app} "
+                      f"-- pass --cevit or --celere", file=sys.stderr)
+                return 1
+            args.flavour = seen
+        elif seen is not None and seen != args.flavour:
+            print(f"error: {args.app} looks like a {seen} app but --{args.flavour} "
+                  f"was given -- pass --{seen}", file=sys.stderr)
+            return 1
+        app = (CelereApp if args.flavour == "celere" else AppModel)(args.app)
+        print(f"app {args.app} [{args.flavour}]: {app.n_stages} stages, "
               f"{len(app.cid_stage)} clusters, "
               f"{'compute-while-transfer' if app.overlapped else 'blocking'} hand-off")
         if app.overlapped:
@@ -1537,13 +1916,31 @@ def main():
                   f"item and are merged per label", file=sys.stderr)
 
     total_ns = None
+    dram_peaks = set()
     for line in open(args.log, errors="replace"):
         if "[Performance Counter]" in line:
             m = re.search(r"(\d+) ns", line)
             if m:
                 total_ns = int(m.group(1))
+        elif "MAX BW:" in line:
+            m = DRAM_MAX_BW_RE.search(line)
+            if m:
+                dram_peaks.add(float(m.group(1)))
 
-    clusters = build(per_core, app)
+    set_dram_peak(args.dram_peak, dram_peaks)
+
+    clusters, incomplete = build(per_core, app,
+                                 partial_ok=args.partial or args.flavour == "celere")
+    if incomplete:
+        print()
+        print("    NOTE: this log is partial -- the run did not reach the end of "
+              "every stage.")
+        print("    The clusters below are labelled as far as they got; their "
+              "missing regions are")
+        print("    absent from the totals, so treat those as lower bounds.")
+        for cluster in sorted(incomplete, key=cluster_id):
+            ran, of = incomplete[cluster]
+            print(f"      {cluster:<12} reached region {ran} of {of}")
     # Only the serialized case pins the unbracketed hand-offs to a step of their
     # own; see add_handoff_regions().
     if getattr(app, "overlapped", False) and app.n_iter == 1:
@@ -1552,7 +1949,7 @@ def main():
     if args.csv:
         write_csv(clusters, args.csv, app)
         print(f"\nwrote {args.csv}")
-    make_plots(clusters, app, args)
+    make_plots(clusters, app, args, incomplete)
     return 0
 
 

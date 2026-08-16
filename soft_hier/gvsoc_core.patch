@@ -1,3 +1,87 @@
+diff --git a/engine/include/vp/itf/io.hpp b/engine/include/vp/itf/io.hpp
+index aadb7a82..e19bbc67 100644
+--- a/engine/include/vp/itf/io.hpp
++++ b/engine/include/vp/itf/io.hpp
+@@ -72,7 +72,10 @@ namespace vp {
+     friend class IoSlave;
+ 
+   public:
+-    IoReq() {}
++    // payload[0] is the collective side-band read by network interfaces (0 means "not a
++    // collective"). Producers that do not use collectives never write it, so it must start
++    // cleared here and in prepare(), otherwise recycled heap bytes get decoded as a collective.
++    IoReq() { payload[0] = 0; }
+ 
+     IoReq(uint64_t addr, uint8_t *data, uint64_t size, bool is_write)
+     : addr(addr), data(data), size(size), is_write((IoReqOpcode)is_write)
+@@ -154,7 +157,7 @@ namespace vp {
+ 
+     inline int arg_current_index() { return this->current_arg; }
+ 
+-    inline void prepare() { latency = 0; duration=0; debug=false; }
++    inline void prepare() { latency = 0; duration=0; debug=false; payload[0] = 0; }
+     inline void init() {
+       prepare(); current_arg=0;
+ #ifdef VP_MEMCHECK_ACTIVE
+diff --git a/engine/include/vp/jsmn.h b/engine/include/vp/jsmn.h
+index 64f20f60..4aed5b4d 100644
+--- a/engine/include/vp/jsmn.h
++++ b/engine/include/vp/jsmn.h
+@@ -61,8 +61,12 @@ enum jsmnerr {
+  */
+ typedef struct {
+ 	jsmntype_t type;
+-	int start;
+-	int end;
++	/* Byte offsets into the JSON string. These must be wide enough to index the
++	 * whole document: a generated GVSoC platform config passes 2 GB somewhere
++	 * around 18 clusters, and an int here silently wraps negative, after which
++	 * json.cpp indexes ~2 GB before the buffer. */
++	ptrdiff_t start;
++	ptrdiff_t end;
+ 	int size;
+ #ifdef JSMN_PARENT_LINKS
+ 	int parent;
+@@ -75,7 +79,7 @@ typedef struct {
+  * the string being parsed now and current position in that string
+  */
+ typedef struct {
+-	unsigned int pos; /* offset in the JSON string */
++	size_t pos; /* offset in the JSON string */
+ 	unsigned int toknext; /* next token to allocate */
+ 	int toksuper; /* superior token node, e.g parent object or array */
+ } jsmn_parser;
+diff --git a/engine/src/jsmn.cpp b/engine/src/jsmn.cpp
+index 6ffa152f..99b73260 100644
+--- a/engine/src/jsmn.cpp
++++ b/engine/src/jsmn.cpp
+@@ -44,7 +44,7 @@ static jsmntok_t *jsmn_alloc_token(jsmn_parser *parser,
+  * Fills token type and boundaries.
+  */
+ static void jsmn_fill_token(jsmntok_t *token, jsmntype_t type,
+-                            int start, int end) {
++                            ptrdiff_t start, ptrdiff_t end) {
+ 	token->type = type;
+ 	token->start = start;
+ 	token->end = end;
+@@ -57,7 +57,7 @@ static void jsmn_fill_token(jsmntok_t *token, jsmntype_t type,
+ static int jsmn_parse_primitive(jsmn_parser *parser, const char *js,
+ 		size_t len, jsmntok_t *tokens, size_t num_tokens) {
+ 	jsmntok_t *token;
+-	int start;
++	size_t start;
+ 
+ 	start = parser->pos;
+ 
+@@ -107,7 +107,7 @@ static int jsmn_parse_string(jsmn_parser *parser, const char *js,
+ 		size_t len, jsmntok_t *tokens, size_t num_tokens) {
+ 	jsmntok_t *token;
+ 
+-	int start = parser->pos;
++	size_t start = parser->pos;
+ 
+ 	parser->pos++;
+ 
 diff --git a/models/cpu/iss/include/cores/snitch_fast/class.hpp b/models/cpu/iss/include/cores/snitch_fast/class.hpp
 index 397bcc76..0e359376 100644
 --- a/models/cpu/iss/include/cores/snitch_fast/class.hpp
@@ -201,19 +285,6 @@ index b3b1eb29..bae71a24 100644
          _this->denied_req_queue.pop();
      }
  }
-diff --git a/models/memory/dramsys.py b/models/memory/dramsys.py
-index efb437e1..4c954df2 100644
---- a/models/memory/dramsys.py
-+++ b/models/memory/dramsys.py
-@@ -26,7 +26,7 @@ class Dramsys(st.Component):
- 
-         self.add_properties({
-             'require_systemc': True,
--            'dram-type': 'hbm2-example.json',
-+            'dram-type': 'lpddr4-example.json',
-             'pim-support': pim_support,
-         })
- 
 diff --git a/models/utils/common_cells.py b/models/utils/common_cells.py
 index 3916ea4f..24a4d07d 100644
 --- a/models/utils/common_cells.py
