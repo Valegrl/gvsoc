@@ -88,6 +88,7 @@ class ClusterArch:
                         bank_factor,
                         axi_data_width,
                         dma_tcdm_outstanding,
+                        dma_burst_queue_size,
                         nb_axi_masters_per_group,
                         nb_l2_banks,
                         sync_base,
@@ -129,6 +130,7 @@ class ClusterArch:
         self.bank_size                  = bank_size
         self.axi_data_width             = axi_data_width
         self.dma_tcdm_outstanding       = dma_tcdm_outstanding
+        self.dma_burst_queue_size       = dma_burst_queue_size
         self.nb_axi_masters_per_group   = nb_axi_masters_per_group
         self.nb_l2_banks                = nb_l2_banks
 
@@ -202,7 +204,8 @@ class ClusterUnit(gvsoc.systree.Component):
 
         # DMA
         dma = FlexMemPoolDma(self, 'dma', loc_base=arch.base, loc_size=arch.tcdm_size + data_dumpper_input_size, tcdm_width=arch.axi_data_width,
-                             tcdm_outstanding=arch.dma_tcdm_outstanding)
+                             tcdm_outstanding=arch.dma_tcdm_outstanding,
+                             burst_queue_size=arch.dma_burst_queue_size)
 
         # Binary Loader
         loader = utils.loader.loader.ElfLoader(self, 'loader', binary=binary, entry=arch.insn_area.base)

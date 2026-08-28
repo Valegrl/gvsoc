@@ -22,7 +22,7 @@ class FlexClusterArch:
 
         #Cluster
         self.num_cluster_x           = 4
-        self.num_cluster_y           = 6
+        self.num_cluster_y           = 8
 
         self.cluster_tcdm_base       = 0x00000000
         self.cluster_tcdm_size       = 0x00400000
@@ -48,6 +48,7 @@ class FlexClusterArch:
         self.bank_size                   = 2048
         self.axi_data_width              = 64
         self.dma_tcdm_outstanding        = 32
+        self.dma_burst_queue_size        = 32
         self.nb_axi_masters_per_group    = 4
         self.instruction_mem_size        = 0x400000
         self.nb_l2_banks                 = 4

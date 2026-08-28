@@ -31,6 +31,7 @@ clusters are labelled as far as they got, so their totals are lower bounds.
 
 import argparse
 import csv
+import math
 import re
 import sys
 from collections import defaultdict, namedtuple
@@ -69,13 +70,31 @@ DEFINE_RE = re.compile(r"^#define\s+(\w+)\s+(\d+)[UL]*", re.M)
 STAGE_TITLE_RE = re.compile(r"^/\* stage (\d+)\s*:\s*(.*?)\s*\*/", re.M)
 # The compute-while-transfer generator passes the item parity in, so the
 # signature is compute_stage_N(uint32_t buf) there and compute_stage_N(void) in
-# the blocking one.
+# the blocking one.  THE QUALIFIERS BETWEEN `static` AND `void` ARE NOT FIXED:
+# the generator marks the stage bodies NO_INLINE (its own macro for
+# __attribute__((noinline))) to give each one its own stack frame, and used to
+# mark them `inline`.  Anything of that shape is accepted, since a missed match
+# here costs the whole app its kernel labels and reports raw regions.
 COMPUTE_FN_RE = re.compile(
-    r"^static inline void compute_stage_(\d+)\([^)]*\)\s*\n\{(.*?)^\}", re.M | re.S)
+    r"^static[ \t]+(?:\w+[ \t]+)*?void[ \t]+compute_stage_(\d+)\s*\([^)]*\)"
+    r"\s*\n\{(.*?)^\}", re.M | re.S)
 # The DMA helpers the generator emits, newest spelling first.  Each brackets
 # itself, so every CALL is a region.  dma_1d() is the older generator's
 # contiguous helper, kept so its logs still parse.
 DMA_CALLS = ("dma_2d_strided", "dma_2d", "dma_1d")
+# The bracket a measured region sits in.  A REGION IS ONE start/stop PAIR, NOT
+# ONE KERNEL CALL, and the two stopped agreeing once the layout rows became real
+# kernels: the generator brackets all the pieces of one row together (a fold
+# split into whole windows and a remainder is two calls, one region) and
+# brackets a pure VIEW -- a row whose operand already sits in the order its
+# consumer wants -- around nothing at all.  Counting calls gives the first case
+# too many regions and the second none, and either one slides the rest of the
+# cluster's table against the log and costs it every label.
+BENCH_START_RE = re.compile(r"^mempool_start_benchmark\s*\(")
+BENCH_STOP_RE = re.compile(r"^mempool_stop_benchmark\s*\(")
+# 'RSHP QF, KF : Fold ... 572x128' -> ('RSHP', 'QF, KF : Fold ...', 572, 128).
+# The shape is what _fold_region() adds up when a bracket holds several calls.
+SHAPE_LABEL_RE = re.compile(r"^(\w[\w&+/.-]*)\s+(.*?)\s+(\d+)x(\d+)$")
 # "Skip Sum [add]: Y += X" -> ("Skip Sum", "add").  The tag is one word but not
 # always one \w+ run (celere spells a fused layout op '[split&reshape]'); a layer
 # heading ('FFN[rows 1-3] x1') has a space in its bracket and so is not a region.
@@ -155,12 +174,19 @@ KERNEL_SPECS = [
      lambda n, g, t: f"GELU {n} ({g[0]} el)"),
     (re.compile(rf"relu_f16\(\s*{B},\s*(\d+)u?"),
      lambda n, g, t: f"RELU {n} ({g[0]} el)"),
-    # patchify_f16(src, dst, Nf, Nt, C, Nh, Nw, cid, nt) and its inverse.  The
-    # label carries the shape the kernel walks (R rows of Nh*Nw), not the grid
-    # dims, since that is what reshape_work() costs.
-    (re.compile(rf"(un)?patchify_f16\(\s*{B},\s*{B},\s*"
+    # patchify_f16p(src, dst, tok0, f0, n_tok, Nt, Nh, Nw, C, cid, nt) and its
+    # inverse.  The first four arguments are per-lane expressions, not literals
+    # (`lane * 546u`), so only the shape is read.  The label carries the shape
+    # the kernel WALKS -- n_tok*Nh units of Nw -- since that is what layout_work()
+    # costs; see reshape_label().
+    (re.compile(rf"(un)?patchify_f16p\(\s*{B},\s*{B},\s*{B},\s*{B},\s*"
                 r"(\d+)u?,\s*(\d+)u?,\s*(\d+)u?,\s*(\d+)u?,\s*(\d+)u?"),
      lambda n, g, t: reshape_label(n, g)),
+    # transpose_f16p(src, dst, rows, cols, cid, nt).  Layout work like the
+    # reshape above and modelled the same way, but its own legend class: it is
+    # one of the model's own rows (transpose K), not the grid packing.
+    (re.compile(rf"transpose_f16p\(\s*{B},\s*{B},\s*(\d+)u?,\s*(\d+)u?"),
+     lambda n, g, t: f"TRSP {n} {g[0]}x{g[1]}"),
     # mempool_wait(3805UL) -- a bracketed stand-in for a kernel that is not in
     # this tree (cevit's unridden layout rows, celere's FFTs and rope).  One call
     # covers all of them, so the label leads with the comment's own [tag] to keep
@@ -187,16 +213,19 @@ def _stand_in_label(name, tag):
 
 
 def reshape_label(name, g):
-    """-> the label for a patchify_f16 / unpatchify_f16 call.
+    """-> the label for a patchify_f16p / unpatchify_f16p call.
 
-    g is ('un' or None, Nf, Nt, C, Nh, Nw).  A patch is Nh x Nw and the channel
-    index C is part of the ROW index, so the token matrix is (Nf/Nh)*(Nt/Nw)*C
-    rows of Nh*Nw -- the same element count either way, so both directions cost
-    the same and share one model.
+    g is ('un' or None, n_tok, Nt, Nh, Nw, C).  A patch is Nh x Nw, so this
+    lane's slab is n_tok tokens of Nh*Nw elements -- but the kernel deals out a
+    finer unit than a token: a WORK UNIT is one PATCH ROW, u = j*Nh + a, and a
+    core takes a contiguous chunk of the n_tok*Nh of them.  The label carries
+    that unit shape, because it is what layout_work() has to divide over the
+    cores; the element count is the same either way, so both directions cost the
+    same and share one model.
     """
-    nf, nt, c, nh, nw = (int(x) for x in g[1:])
-    rows = (nf // nh) * (nt // nw) * c
-    return f"RSHP {name} {rows}x{nh * nw} ({'unpatchify' if g[0] else 'patchify'})"
+    n_tok, nt, nh, nw, c = (int(x) for x in g[1:])
+    return (f"RSHP {name} {n_tok * nh}x{nw} "
+            f"({'unpatchify' if g[0] else 'patchify'})")
 
 
 def _comment_parts(text):
@@ -433,12 +462,10 @@ class AppModel:
     plot_tag = "CEViT"
 
     def __init__(self, path):
-        self.path = path
         src = Path(path).read_text()
         bare = COMMENT_RE.sub(" ", src)     # comments carry digits of their own
 
         d = {m.group(1): int(m.group(2)) for m in DEFINE_RE.finditer(bare)}
-        self.defines = d
         self.n_stages = d["N_STAGES"]
         self.n_iter = d.get("N_ITER", 1)
 
@@ -463,8 +490,7 @@ class AppModel:
         # ctt puts stage s on item m at step m + s, cwt at step m + 2s, leaving a
         # spare step between a producer and its consumer for the transfer.  Both
         # bracket every DMA, so this changes no region's existence.
-        self.phase_stride = self._phase_stride(bare)
-        self.overlapped = self.phase_stride > 1
+        self.overlapped = self._phase_stride(bare) > 1
 
         # The environment the hand-off nests are evaluated in: the #defines, the
         # stage enum, the placement tables, and the app's own one-line helpers.
@@ -581,6 +607,44 @@ class AppModel:
         return []
 
     @staticmethod
+    def _fold_region(labels, ctx, dm):
+        """-> [(label, dm_only)] for the ONE region a start/stop bracket measures.
+
+        Three shapes reach this, in the order the generator emits them:
+
+          one call    the common row; its own label, unchanged
+          several     one layer row cut into pieces (a fold over whole windows
+                      plus a remainder, a gather of Q then K then V).  The pieces
+                      are the same kernel over the same unit width, so the region
+                      costs their SUM -- summing the unit counts keeps the label
+                      in the shape work_model() reads and scores the region as
+                      the one span the log timed
+          none        a VIEW: the row is a relabelling its consumer reads as-is,
+                      so the generator brackets the comment alone and the log
+                      carries a region of about one cycle.  It still has to
+                      appear, or every later region in the stage shifts by one
+
+        A fold of pieces this cannot add up (different kernels, or a shape that
+        is not `UxV`) keeps every piece in the label and goes unscored, which
+        loses the row's utilization but never its place in the sequence.
+        """
+        if not labels:
+            text = ctx["comment"]
+            ctx["comment"] = None
+            name, tag = _comment_parts(text) if text else ("view", None)
+            return [(f"{_stand_in_label(name, tag)} (view, no work)", dm)]
+        if len(labels) == 1:
+            return labels
+        dm_only = all(d for _, d in labels)
+        parts = [SHAPE_LABEL_RE.match(label) for label, _ in labels]
+        if all(parts) and len({(p.group(1), p.group(4)) for p in parts}) == 1:
+            head = parts[0]
+            total = sum(int(p.group(3)) for p in parts)
+            return [(f"{head.group(1)} {head.group(2)} "
+                     f"{total}x{head.group(4)}", dm_only)]
+        return [(" + ".join(label for label, _ in labels), dm_only)]
+
+    @staticmethod
     def _scan(lines, i, dm, ctx, specs=None):
         """-> ([(label, dm_only), ...], index past the block that starts at i).
 
@@ -588,14 +652,19 @@ class AppModel:
         is that many regions in the log, and a `if (flex_is_dm_core())` block
         makes every region inside it dm-only -- which a per-line test would miss
         when the guard sits on a line of its own.
+
+        Between a mempool_start_benchmark() and its stop, what the statements
+        yield is held back and folded into the single region the pair measures;
+        outside one, a statement that brackets ITSELF (every DMA helper does) is
+        a region on its own, as before.
         """
-        out = []
+        out, pend = [], None
         while i < len(lines):
             line = lines[i]
             i += 1
             bare = COMMENT_RE.sub(" ", line).strip()
             if bare.startswith("}"):
-                return out, i
+                break
             if not bare:                        # a comment and nothing else
                 m = re.search(r"/\*\s*(.*?)\s*\*/", line)
                 # Only a region comment ('name [tag]: ...') labels a region; the
@@ -603,17 +672,27 @@ class AppModel:
                 if m and COMMENT_NAME_RE.match(m.group(1)):
                     ctx["comment"] = m.group(1)
                 continue
+            if BENCH_START_RE.match(bare):
+                pend = []
+                continue
+            if BENCH_STOP_RE.match(bare):
+                out.extend(AppModel._fold_region(pend or [], ctx, dm))
+                pend = None
+                continue
             trips = 1
             if bare.startswith("for"):
                 m = re.search(r"<\s*(\d+)", bare)
                 trips = int(m.group(1)) if m else 1
             # the guard covers this statement or block only, never its siblings
             dm_here = dm or "flex_is_dm_core" in bare
+            sink = out if pend is None else pend
             if bare.endswith("{"):
                 body, i = AppModel._scan(lines, i, dm_here, ctx, specs)
-                out.extend(body * trips)
+                sink.extend(body * trips)
                 continue
-            out.extend(AppModel._region_of(line, ctx, dm_here, specs))
+            sink.extend(AppModel._region_of(line, ctx, dm_here, specs))
+        if pend:                        # an unclosed bracket: keep its regions
+            out.extend(pend)
         return out, i
 
     @staticmethod
@@ -1037,19 +1116,23 @@ class AppModel:
 # This tracks the CURRENT generator only: a log from an earlier one reports raw.
 # --------------------------------------------------------------------------
 
-CELERE_COMPUTE_FN_RE = re.compile(
-    r"^static\s+inline\s+void\s+compute_stage_(\d+)\s*\([^)]*\)\s*\n\{(.*?)^\}",
-    re.M | re.S)
-# permute_PN_f16's own comment sizes it: "105216 blocks x 8 elements".
-CELERE_PERM_SIZE_RE = re.compile(r"(\d+)\s+blocks\s+x\s+(\d+)\s+elements")
-CELERE_PERM_FN_RE = re.compile(
-    r"^static void (permute_\w+)\([^)]*\)[^{]*\{(.*?)^\}", re.M | re.S)
-
 # What the two hand-off tables give a DMA row: how many bytes it moves and what
 # to call it.  An Xfer's `rows` and `src_off` reach no label (rows becomes the 2D
 # descriptor's strides, src_off addresses the producer's own buffer) but both are
 # carried, since a row lacking either is not a table this parser can read.
-Xfer = namedtuple("Xfer", "nbytes rows src_off name")
+#
+# The five trailing fields are the LAYOUT-ROW form the generator grew later, and
+# they change the region COUNT, not just a size: nseg > 0 makes the leg walk
+# `cols` box columns per consumer and issue SEG[seg0 .. seg0+nseg) inside each,
+# which is cols * nseg bracketed DMAs where the plain copy issues one.  They
+# default to the plain copy, so an older 3-field row still reads.
+Xfer = namedtuple("Xfer", "nbytes rows src_off cols src_pitch dst_pitch "
+                          "seg0 nseg name",
+                  defaults=(0, 0, 0, 0, 0, None))
+# One segment of a layout row's token-order map, as SEG[] lists it: the bytes the
+# single 2D descriptor moves (chunk * reps) and what that piece is called.  The
+# offsets and strides say WHERE it lands, which no region row carries.
+Seg = namedtuple("Seg", "nbytes name")
 # One off-chip leg: the bytes ONE descriptor moves, the edge it crosses, and how
 # many nodes the entry walks -- lpddr_pull()/lpddr_push() issue one bracketed DMA
 # of `nbytes` per node, so `nodes` is a region count, not a size.
@@ -1062,7 +1145,28 @@ CELERE_KERNEL_SPECS = KERNEL_SPECS + [
     # mempool_radix4_cfft_f16p(...), deliberately unsized: the kernel's header is
     # not in this tree, and the region is unscored either way.
     (re.compile(r"mempool_radix4_cfft_f16p\("), lambda n, g, t: f"FFT  {n}"),
+    # pool_mean_f16p(src, dst, spans, Nh, Nw, row_stride, cid, nt).  Unsized for
+    # the same reason as the FFT: the kernel is not in this tree, so how it deals
+    # a span out over the cores is not known and a peak would be invented.  The
+    # label carries the span shape only, to tell two pool rows apart.
+    (re.compile(rf"pool_mean_f16p\(\s*{B},\s*{B},\s*"
+                r"(\d+)u?,\s*(\d+)u?,\s*(\d+)u?"),
+     lambda n, g, t: f"POOL {n} {g[0]}x{g[1]}x{g[2]}"),
 ]
+
+# permute_f16p(src, dst, elems, levels, n_levels, cid, nt) -- the generator's one
+# permutation kernel.  The call carries the BLOCK width; how many blocks there are
+# is the product of the level counts, and those live in the table named by the
+# fourth argument, so the label is finished from the body's own tables (see
+# CelereApp._perm_tables).
+CELERE_PERMUTE_CALL_RE = re.compile(
+    rf"permute_f16p\(\s*{B},\s*{B},\s*(\d+)u?,\s*(\w+)\s*,")
+# One `static const perm_level_t NAME[] = { { count, src_stride, dst_stride },
+# ... };`.  Only the count is read: the strides place a block, the counts say how
+# many there are.
+CELERE_PERM_TABLE_RE = re.compile(
+    r"\bperm_level_t\s+(\w+)\s*\[\s*\]\s*=\s*\{(.*?)\}\s*;", re.S)
+CELERE_PERM_COUNT_RE = re.compile(r"\{\s*(\d+)")
 
 
 def _celere_short(name):
@@ -1084,12 +1188,10 @@ class CelereApp:
     plot_tag = "CELERE"
 
     def __init__(self, path):
-        self.path = path
         src = Path(path).read_text()
         bare = COMMENT_RE.sub(" ", src)
 
         d = {m.group(1): int(m.group(2)) for m in DEFINE_RE.finditer(bare)}
-        self.defines = d
         self.n_stages = d["N_STAGES"]
         self.n_iter = d.get("N_ITER", 1)
 
@@ -1103,26 +1205,18 @@ class CelereApp:
         # The struct tables are read out of the SOURCE, not `bare`: each row's
         # trailing comment names the tensor it carries, and that name is what
         # makes a hand-off row readable in the report.
-        self.xfer = self._xfer_table(src)
+        self.segs = self._seg_table(src)
+        self.xfer = self._xfer_table(src, self.segs)
         self.lpddr_in = self._lpddr_table(src, "LPDDR_IN_XFER")
         self.lpddr_out = self._lpddr_table(src, "LPDDR_OUT_XFER")
-
-        # The kernel table gains one entry per permutation the app carries, each
-        # closing over the size read out of that function's own comment.
-        specs = list(CELERE_KERNEL_SPECS)
-        for name, rows, cols in self._permutes(src):
-            specs.append((re.compile(rf"\b{name}\("),
-                          lambda n, g, t, r=rows, c=cols:
-                              f"RSHP {_celere_short(n)} {r}x{c}"))
-        self.specs = specs
 
         self.titles = {int(m.group(1)): m.group(2)
                        for m in STAGE_TITLE_RE.finditer(src)}
         # Sizes reach the DMA helpers as #defines (TILE_OUT_BYTES), and
         # dma_bytes() only reads literals, so fold them in before scanning.
         expanded = expand_defines(src, d)
-        self.bodies = {int(m.group(1)): self._body(m.group(2), specs)
-                       for m in CELERE_COMPUTE_FN_RE.finditer(expanded)}
+        self.bodies = {int(m.group(1)): self._body(m.group(2))
+                       for m in COMPUTE_FN_RE.finditer(expanded)}
 
         self.stages = {}
         for sid in range(1, self.n_stages + 1):
@@ -1133,13 +1227,46 @@ class CelereApp:
     # -- source tables ----------------------------------------------------
 
     @staticmethod
-    def _xfer_table(src):
+    def _seg_table(src):
+        """-> [Seg, ...], one entry per SEG[] row; [] when the app declares none.
+
+        A row is { chunk, src_off, dst_off, src_stride, dst_stride, reps }: one
+        segment of a layout row's token-order map, issued as a single bracketed
+        2D descriptor moving chunk * reps bytes.  Only that product reaches a
+        label, but a row of another shape would mis-count the descriptors a
+        layout leg costs, so it is an error rather than a silent zero.
+        """
+        rows = table_rows(src, "SEG")
+        if rows is None:
+            return []
+        out = []
+        for fields, comment in rows:
+            vals = [_uint(f) for f in fields]
+            if len(vals) != 6 or any(v is None for v in vals):
+                raise ValueError(
+                    f"SEG[] row {{{', '.join(fields)}}} is not the "
+                    f"{{ chunk, src_off, dst_off, src_stride, dst_stride, "
+                    f"reps }} this parser reads")
+            out.append(Seg(vals[0] * vals[5], comment))
+        return out
+
+    @staticmethod
+    def _xfer_table(src, segs):
         """-> [Xfer, ...], one entry per STAGE_XFER[] row.
 
-        A row is { bytes, rows, src_off }: the WHOLE tensor across both stages'
-        lanes, the destination row count, and where the producer holds its own
-        share.  Only the byte count reaches a DMA row, but all three are
-        required, so a table of another shape is an error, not a silent zero.
+        A row opens with { bytes, rows, src_off }: the WHOLE tensor across both
+        stages' lanes, the destination row count, and where the producer holds
+        its own share.  The generator has grown the row once, and both widths
+        are read -- the older columns keep their meaning:
+
+          3   the original plain copy: one bracketed DMA per consumer
+          8   + cols, src_pitch, dst_pitch, seg0, nseg.  nseg > 0 IS A LAYOUT
+              ROW -- the leg walks `cols` box columns per consumer and issues
+              SEG[seg0 .. seg0+nseg) inside each, so it costs cols * nseg
+              descriptors, not one.  nseg == 0 is the plain copy above
+
+        Only byte counts reach a label, but every field is required, so a table
+        of another shape is an error, not a silent zero.
         """
         rows = table_rows(src, "STAGE_XFER")
         if rows is None:
@@ -1147,11 +1274,18 @@ class CelereApp:
         out = []
         for fields, comment in rows:
             vals = [_uint(f) for f in fields]
-            if len(vals) != 3 or any(v is None for v in vals):
+            if len(vals) not in (3, 8) or any(v is None for v in vals):
                 raise ValueError(
-                    f"STAGE_XFER[] row {{{', '.join(fields)}}} is not the "
-                    f"{{ bytes, rows, src_off }} this parser reads")
-            out.append(Xfer(*vals, name=comment))
+                    f"STAGE_XFER[] row {{{', '.join(fields)}}} is neither the "
+                    f"3-field {{ bytes, rows, src_off }} nor the 8-field "
+                    f"layout-row xfer_t shape this parser reads")
+            x = Xfer(*vals, name=comment)
+            if x.nseg and x.seg0 + x.nseg > len(segs):
+                raise ValueError(
+                    f"STAGE_XFER[] row '{comment}' claims SEG"
+                    f"[{x.seg0}..{x.seg0 + x.nseg}), but the app declares "
+                    f"{len(segs)} segment(s)")
+            out.append(x)
         if not out:
             raise ValueError("no rows in STAGE_XFER[]")
         return out
@@ -1192,16 +1326,6 @@ class CelereApp:
             out.append(Leg(vals[3] * vals[6], edge, nodes, comment))
         return out
 
-    @staticmethod
-    def _permutes(src):
-        """-> [(fn_name, blocks, elems_per_block), ...] for the app's permutations."""
-        out = []
-        for m in CELERE_PERM_FN_RE.finditer(src):
-            size = CELERE_PERM_SIZE_RE.search(m.group(2))
-            if size:
-                out.append((m.group(1), int(size.group(1)), int(size.group(2))))
-        return out
-
     # -- region tables ----------------------------------------------------
 
     @staticmethod
@@ -1225,7 +1349,46 @@ class CelereApp:
         return out
 
     @staticmethod
-    def _body(text, specs):
+    def _perm_tables(text):
+        """-> {table name: how many blocks its levels enumerate}.
+
+        A permutation is a nest of levels, each repeating the one below it
+        `count` times, so the leaves -- the blocks the kernel actually copies --
+        are the PRODUCT of the counts.  The tables are function-local and named
+        per call site, so this is read per stage body, not once per app.
+        """
+        out = {}
+        for m in CELERE_PERM_TABLE_RE.finditer(text):
+            counts = [int(c) for c in CELERE_PERM_COUNT_RE.findall(m.group(2))]
+            if counts:
+                out[m.group(1)] = math.prod(counts)
+        return out
+
+    @staticmethod
+    def _permute_label(name, g, tables):
+        """-> 'RSHP PAT : RA unpack + patchify 8768x48' for one permute_f16p().
+
+        Blocks x elements-per-block is the shape layout_work() costs, and it is
+        the whole tensor: the kernel walks every block the levels enumerate.  A
+        table this body did not declare leaves the label unsized rather than
+        wrong, which costs the row its utilization and nothing else.
+        """
+        blocks = tables.get(g[1])
+        short = _celere_short(name)
+        return f"RSHP {short} {blocks}x{int(g[0])}" if blocks else f"RSHP {short}"
+
+    @staticmethod
+    def _body(text):
+        """-> [(label, dm_only), ...] for one compute_stage_N() of a celere app.
+
+        The permutation spec is built per body: its label needs the level tables,
+        which are function-local and named per call site.
+        """
+        tables = CelereApp._perm_tables(text)
+        specs = CELERE_KERNEL_SPECS + [
+            (CELERE_PERMUTE_CALL_RE,
+             lambda n, g, t: CelereApp._permute_label(n, g, tables)),
+        ]
         lines = CelereApp._fuse_bare_guards(AppModel._logical_lines(text))
         regions, _ = AppModel._scan(lines, 0, False, {"comment": None}, specs)
         return regions
@@ -1264,6 +1427,11 @@ class CelereApp:
         it moves the same bytes either way and does not appear here.  main()
         skips the push for the last stage and for any tiled stage, which drains
         itself.
+
+        A LAYOUT ROW (nseg > 0) overrides all three: the share is not one
+        transfer but one PER SEGMENT of every box column, so the count is
+        r * cols * nseg and each row is sized by its own segment -- the shape
+        of the fan-out only sets r.
         """
         if sid >= self.n_stages or self.tiles[sid] != 1:
             return []
@@ -1275,7 +1443,21 @@ class CelereApp:
             own_src = x.nbytes // lanes         # what this cluster holds
             own_dst = x.nbytes // lanes_nx      # what one consumer needs
             what = f" {x.name}" if x.name else ""
-            if lanes_nx > lanes:
+            if x.nseg:
+                # The nest push_to_next() runs: r consumers, x.cols box columns
+                # each, x.nseg descriptors inside a column.  Every one of them is
+                # bracketed on its own, so every one of them is a region.
+                r = lanes_nx // lanes if lanes_nx > lanes else 1
+                for k in range(r):
+                    dest = (f"stage {sid + 1} lane {k}" if r > 1
+                            else f"stage {sid + 1}")
+                    for _ in range(x.cols):
+                        for s in range(x.nseg):
+                            seg = self.segs[x.seg0 + s]
+                            named = f"{what}: {seg.name}" if seg.name else what
+                            out.append(f"DMA  layout -> {dest}{named}"
+                                       f" ({seg.nbytes} B)")
+            elif lanes_nx > lanes:
                 out += [f"DMA  scatter -> stage {sid + 1} lane {k}"
                         f"{what} ({own_dst} B)"
                         for k in range(lanes_nx // lanes)]
@@ -1438,6 +1620,9 @@ DRAM_MAX_BW_RE = re.compile(r"MAX BW:.*?\|\s*([\d.]+) GB/s")
 DMA_BYTES_RE = re.compile(r"(\d+) B\b")
 
 GEMM_SHAPE_RE = re.compile(r"(\d+)x(\d+)x(\d+)")
+# The 'RxC' every other kernel label carries: rows x columns for the PE kernels,
+# units x elements-per-unit for the layout ones.
+SHAPE_RE = re.compile(r"(\d+)x(\d+)")
 
 # What work_model() returns: uti = ops / (peak_ops * span), ideal = ops/peak_ops.
 # For a DMA an "op" is one byte.  ideal and ceiling are None with no known peak.
@@ -1540,22 +1725,25 @@ def banked_work(length, ops_per_iter):
                 ops, PE_OPS_PER_CYC)
 
 
-def reshape_work(rows, row_elems):
-    """Build a Work for patchify_f16 / unpatchify_f16.
+def layout_work(units, unit_elems):
+    """Build a Work for a permutation kernel: patchify, unpatchify, transpose.
 
     One halfword load and one halfword store per element, no arithmetic, so the
-    unit is the LSU.  Both kernels deal the R output rows out over the cores
-    (`for r = core_id; r < R; r += numThreads`) and each row is whole, so the
-    busiest core owns ceil(R/N_CORES) of them -- that ratio is the imbalance
-    ceiling.
+    unit is the LSU.  All of them deal a UNIT axis out over the cores and keep a
+    unit whole -- a patch row for the reshapes, a matrix row or column for the
+    transpose -- whether they take a contiguous chunk of it (the reshapes) or
+    stride through it (`for r = core_id; r < rows; r += numThreads`).  Either
+    distribution leaves the busiest core ceil(units/N_CORES) of them, and that
+    ratio is the imbalance ceiling.
 
-    Not counted: the four integer div/mod decomposing r into (fp, tp, c) per row,
-    and the Nw tail's loop overhead.  Both are real cycles, so the reported uti
-    is issue-slot occupancy of the memory path and reads low on a short Nw.
+    Not counted: the divisions each kernel pays on entry to place its chunk, and
+    the tail's loop overhead where the unit is not a multiple of the unrolling.
+    Both are real cycles, so the reported uti is issue-slot occupancy of the
+    memory path and reads low on a short unit.
     """
-    ops_per_row = LSU_OPS_PER_ELEM * row_elems
-    total = rows * ops_per_row
-    critical = -(-rows // N_CORES) * ops_per_row        # busiest core's rows
+    ops_per_unit = LSU_OPS_PER_ELEM * unit_elems
+    total = units * ops_per_unit
+    critical = -(-units // N_CORES) * ops_per_unit      # busiest core's units
     ideal = total / LSU_OPS_PER_CYC
     return Work("LSU", ideal, (ideal / critical if critical else None),
                 total, LSU_OPS_PER_CYC)
@@ -1583,12 +1771,11 @@ def work_model(label):
         return Work("TE", macs / TE_MAC_PER_CYC, 1.0, macs, TE_MAC_PER_CYC)
 
     if label.startswith("NORM"):
-        m = GEMM_SHAPE_RE.search(label) or re.search(r"(\d+)x(\d+)", label)
-        rows, cols = (int(x) for x in m.groups()[:2])
+        rows, cols = (int(x) for x in SHAPE_RE.search(label).groups())
         return pe_work(rows, cols, layernorm_ops)
 
     if label.startswith("SMAX"):
-        rows, cols = (int(x) for x in re.search(r"(\d+)x(\d+)", label).groups())
+        rows, cols = (int(x) for x in SHAPE_RE.search(label).groups())
         return pe_work(rows, cols, softmax_ops)
 
     if label.startswith("AXPY"):
@@ -1603,8 +1790,16 @@ def work_model(label):
         return banked_work(int(re.search(r"(\d+) el", label).group(1)), 44)
 
     if label.startswith("RSHP"):
-        rows, cols = (int(x) for x in re.search(r"(\d+)x(\d+)", label).groups())
-        return reshape_work(rows, cols)
+        units, elems = (int(x) for x in SHAPE_RE.search(label).groups())
+        return layout_work(units, elems)
+
+    if label.startswith("TRSP"):
+        # transpose_f16p splits whichever axis keeps every core busy: rows when
+        # there are at least as many as cores, columns otherwise.  The unit is a
+        # row of `cols` elements one way and a column of `rows` the other.
+        rows, cols = (int(x) for x in SHAPE_RE.search(label).groups())
+        return (layout_work(rows, cols) if rows >= N_CORES
+                else layout_work(cols, rows))
 
     return None
 
@@ -1761,6 +1956,21 @@ def rate_cells(w, span):
     return f"{rate:>8.0f} {peak:>10} {'-':>7} {'-':>9}"
 
 
+@dataclass
+class Agg:
+    """Every execution of one region label, summed across the clusters.
+
+    `work` is that label's model, kept whole for the fields that do not add up
+    (the unit, its peak, the per-call ideal); the counters below are the ones
+    that do.
+    """
+    work:  "Work"
+    calls: int = 0
+    span:  int = 0
+    ideal: float = 0.0
+    ops:   int = 0
+
+
 def report(clusters, total_ns, app):
     kernel_totals = defaultdict(int)
     stage_span = {}
@@ -1798,8 +2008,11 @@ def report(clusters, total_ns, app):
             print(f"    {r.label:<{lw}} {n:>5} {r.span:>9} {cells}"
                   f"{OVER_PEAK_MARK if bad else ''}")
             # DMAs are split by link -- the three paths are worth telling apart.
-            kernel_totals[w.kind if w and w.kind.startswith("DMA")
-                          else r.label.split()[0]] += r.span
+            # Everything else goes in by CLASS, so the spellings of one layout
+            # row (RSHP where a kernel ran it, RESHAPE where it was a view) land
+            # in one line here and in one colour on the plots.  Same classifier
+            # as the plots use, so the two agree row for row.
+            kernel_totals[region_class(r.label, w.kind if w else None)] += r.span
 
     print()
     print("=== utilization by kernel")
@@ -1816,28 +2029,27 @@ def report(clusters, total_ns, app):
             w = work_model(r.label)
             if not w:
                 continue
-            a = agg.setdefault(r.label, [w, 0, 0, 0.0, 0])
-            a[1] += 1
-            a[2] += r.span
-            a[3] += w.ideal or 0.0
-            a[4] += w.ops
-    for label, (w, calls, span, ideal, ops) in sorted(
-            agg.items(), key=lambda kv: -kv[1][2]):
-        agg_w = w._replace(ops=ops)
-        print(f"    {label:<{lw - 2}}{w.kind:>9} {calls:>5} {span:>8} "
-              f"{rate_cells(agg_w, span)} "
-              f"{fmt_pct(None if w.ideal is None else ideal / span, 7)}"
-              f"{OVER_PEAK_MARK if over_link_peak(agg_w, span) else ''}")
+            a = agg.setdefault(r.label, Agg(w))
+            a.calls += 1
+            a.span += r.span
+            a.ideal += w.ideal or 0.0
+            a.ops += w.ops
+    for label, a in sorted(agg.items(), key=lambda kv: -kv[1].span):
+        w = a.work._replace(ops=a.ops)
+        print(f"    {label:<{lw - 2}}{w.kind:>9} {a.calls:>5} {a.span:>8} "
+              f"{rate_cells(w, a.span)} "
+              f"{fmt_pct(None if w.ideal is None else a.ideal / a.span, 7)}"
+              f"{OVER_PEAK_MARK if over_link_peak(w, a.span) else ''}")
 
     # One summary line per unit, in the order the units first appear above.
     peaks = {}
     for a in agg.values():
-        peaks.setdefault(a[0].kind, a[0].peak_ops)
+        peaks.setdefault(a.work.kind, a.work.peak_ops)
     for kind, peak_ops in peaks.items():
-        rows = [a for a in agg.values() if a[0].kind == kind]
-        span = sum(a[2] for a in rows)
-        ideal = sum(a[3] for a in rows)
-        ops = sum(a[4] for a in rows)
+        rows = [a for a in agg.values() if a.work.kind == kind]
+        span = sum(a.span for a in rows)
+        ideal = sum(a.ideal for a in rows)
+        ops = sum(a.ops for a in rows)
         if not span:
             continue
         if kind.startswith("DMA"):
@@ -1888,8 +2100,8 @@ def report(clusters, total_ns, app):
     print()
     print("=== by kernel class (sum of spans over all clusters)")
     grand = sum(kernel_totals.values())
-    # A class is one word, but not always a short one (celere spells a fused
-    # layout op SPLIT&RESHAPE), so 10 is only the floor.
+    # A class is one word, but not always a short one (a DMA carries its link),
+    # so 10 is only the floor.
     kw = max([10] + [len(k) for k in kernel_totals])
     for k, v in sorted(kernel_totals.items(), key=lambda kv: -kv[1]):
         print(f"    {k:<{kw}} {v:>10} cyc  {100.0 * v / grand:5.1f}%")
@@ -1993,6 +2205,8 @@ LAYER_COLORS = {
     "AXPY":      "#8c564b",
     "RELU":      "#c49c94",
     "RSHP":      "#9467bd",
+    "TRSP":      "#c5b0d5",     # layout work like RSHP, hence the same family
+    "POOL":      "#bcbd22",
     "DMA L1":    "#ffbb78",     # layout copy: local, hence compute-side warm
     "DMA NoC":   "#2ca02c",
     "DMA LPDDR": "#17becf",
@@ -2009,12 +2223,14 @@ LAYER_LEGEND = {
     "DMA NoC": "DMA remote L1",
 }
 
-# Classes that are one kernel wearing two names.  A celere stand-in takes its
-# class from the comment's [tag], and the split that opens a reshape is tagged
-# [split&reshape] -- the same layout work, so it shares the reshape class rather
-# than costing the legend a second entry and colour.
+# Classes that are one kernel wearing two names.  A region that is not a kernel
+# call -- a mempool_wait() stand-in, a view -- takes its class from the comment's
+# [tag], so the same layout row is spelled RESHAPE there and RSHP where a
+# permutation kernel ran it.  They are one class: folding them keeps the legend
+# to one entry and one colour for the layout work of a stage.
 LAYER_ALIASES = {
-    "SPLIT&RESHAPE": "RESHAPE",
+    "SPLIT&RESHAPE": "RSHP",
+    "RESHAPE": "RSHP",
 }
 
 
@@ -2067,6 +2283,11 @@ class Stage:
         return max(l.wall(overlap) for l in self.lanes)
 
 
+def schedule_name(overlapped):
+    """The schedule's own name, as the report and the warnings spell it."""
+    return "compute-while-transfer" if overlapped else "compute-then-transfer"
+
+
 def is_transfer(kind):
     """True = crosses a link, False = compute (an unmodelled region counts as compute)."""
     return kind is not None and kind.startswith(TRANSFER_KINDS)
@@ -2111,14 +2332,15 @@ def build_stages(clusters, app, cycles_per_ms):
             # The stage input is tracked apart because CWT cannot overlap it; its
             # sibling `L1 -> LPDDR (stage output)` shares the unit but IS
             # overlapped, so the label is what separates the two.
-            is_din = (is_transfer(kind) and "stage input" in r.label.lower())
-            if is_transfer(kind):
+            xf = is_transfer(kind)
+            is_din = xf and "stage input" in r.label.lower()
+            if xf:
                 xfer += r.span
                 din += r.span if is_din else 0
             else:
                 comp += r.span
-            layers.append(Layer(region_class(r.label, kind), r.span / cycles_per_ms,
-                                is_transfer(kind), is_din))
+            layers.append(Layer(region_class(r.label, kind),
+                                r.span / cycles_per_ms, xf, is_din))
         stages.setdefault(sidx, Stage(idx=sidx)).lanes.append(Lane(
             cid         = cid,
             name        = cluster,
@@ -2371,8 +2593,8 @@ def make_plots(clusters, app, args, incomplete=None):
         tag = "CWT" if overlap else "CTT"
         if overlap != app.overlapped:
             print(f"warning: --plot_{tag.lower()} but the app runs a "
-                  f"{'compute-while-transfer' if app.overlapped else 'compute-then-transfer'}"
-                  f" schedule; drawing it as asked", file=sys.stderr)
+                  f"{schedule_name(app.overlapped)} schedule; drawing it as "
+                  f"asked", file=sys.stderr)
         print_pipeline_model(label, stages, overlap)
         out = (Path(path) if path else
                log.parent / f"{app.flavour}_bench_plots"
@@ -2477,8 +2699,7 @@ def main():
         span = "" if app.n_working == cids else f" over {cids} cids"
         print(f"app {args.app} [{args.flavour}]: {app.n_stages} stages, "
               f"{app.n_working} clusters{span}, "
-              f"{'compute-while-transfer' if app.overlapped else 'compute-then-transfer'} "
-              f"schedule")
+              f"{schedule_name(app.overlapped)} schedule")
         # Every stage repeats per item, so a second item would reuse the region
         # labels and silently fold two executions into one row.
         if app.n_iter != 1:
