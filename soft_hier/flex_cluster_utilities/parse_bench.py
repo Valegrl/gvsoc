@@ -13,7 +13,7 @@ Every core writes CSR_TRACE around each region, so a run produces one line per
     ./parse_bench.py log_bench.log --app main.c
     ./parse_bench.py log_bench.log --app main.c --csv out.csv
     ./parse_bench.py log_bench.log --raw        # no labels, just region indices
-    ./parse_bench.py log_bench.log --app main.c --plot_ctt   # and the stage figure
+    ./parse_bench.py log_bench.log --app main.c --plot_ctt   # and the stage figures
     ./parse_bench.py celere.log --app celere.c --celere      # the celere generator
 
 A [BENCH] record identifies its region only by a numeric index, so the kernel
@@ -68,20 +68,17 @@ DEFINE_RE = re.compile(r"^#define\s+(\w+)\s+(\d+)[UL]*", re.M)
 # differently: '/* stage 2 : [ZN : Normalize on dim i_4] */' (celere),
 # '/* stage 2: rows 14, 15, 16, 8 lanes over i_2 x i_3 */' (cevit).
 STAGE_TITLE_RE = re.compile(r"^/\* stage (\d+)\s*:\s*(.*?)\s*\*/", re.M)
-# The compute-while-transfer generator passes the item parity in, so the
-# signature is compute_stage_N(uint32_t buf) there and compute_stage_N(void) in
-# the blocking one.  THE QUALIFIERS BETWEEN `static` AND `void` ARE NOT FIXED:
-# the generator marks the stage bodies NO_INLINE (its own macro for
-# __attribute__((noinline))) to give each one its own stack frame, and used to
-# mark them `inline`.  Anything of that shape is accepted, since a missed match
-# here costs the whole app its kernel labels and reports raw regions.
+# A stage body: `static NO_INLINE void compute_stage_N(...)`, NO_INLINE being the
+# generator's own macro for __attribute__((noinline)), which gives each stage its
+# own stack frame.  The parameter list differs between the generators (celere
+# passes the item parity, cevit the lane and the parity) and is not read.
 COMPUTE_FN_RE = re.compile(
-    r"^static[ \t]+(?:\w+[ \t]+)*?void[ \t]+compute_stage_(\d+)\s*\([^)]*\)"
+    r"^static[ \t]+NO_INLINE[ \t]+void[ \t]+compute_stage_(\d+)\s*\([^)]*\)"
     r"\s*\n\{(.*?)^\}", re.M | re.S)
-# The DMA helpers the generator emits, newest spelling first.  Each brackets
-# itself, so every CALL is a region.  dma_1d() is the older generator's
-# contiguous helper, kept so its logs still parse.
-DMA_CALLS = ("dma_2d_strided", "dma_2d", "dma_1d")
+# The DMA helpers the generator emits, longest spelling first so that dma_2d does
+# not match inside dma_2d_strided.  Each brackets itself, so every CALL is a
+# region.
+DMA_CALLS = ("dma_2d_strided", "dma_2d")
 # The bracket a measured region sits in.  A REGION IS ONE start/stop PAIR, NOT
 # ONE KERNEL CALL, and the two stopped agreeing once the layout rows became real
 # kernels: the generator brackets all the pieces of one row together (a fold
@@ -279,7 +276,7 @@ def call_args(text, fn):
 def dma_bytes(fn, args):
     """-> the bytes one call of a DMA helper moves, or None if they are not literal.
 
-    dma_1d/dma_2d carry the count as their third argument; the strided form moves
+    dma_2d carries the count as its third argument; the strided form moves
     `repeat` chunks of `size` (how a transpose is issued).
     """
     idx = (2, 5) if fn == "dma_2d_strided" else (2,)
@@ -708,11 +705,9 @@ class AppModel:
     def _lpddr_table(src, name):
         """-> [CevitLeg, ...], one entry per lpddr_t row of `name[]`.
 
-        The placement columns of a row come and go with the generator, so the row
-        is matched against the app's OWN lpddr_t declaration and read by field
-        name: only `edge`, `bytes` and `pieces` are used, and reading them by
-        position is what a new column would silently break.  A declaration with
-        no `pieces` cuts nothing up, so its rows move one piece each.
+        The row is matched against the app's OWN lpddr_t declaration and read by
+        field name: only `edge`, `bytes` and `pieces` are used, and reading them
+        by position is what a new placement column would silently break.
         """
         decl = LPDDR_STRUCT_RE.search(COMMENT_RE.sub(" ", src))
         if not decl:
@@ -731,7 +726,7 @@ class AppModel:
             leg = dict(zip(names, vals))
             out.append(CevitLeg(leg["bytes"],
                                 "north" if leg["edge"] else "south",
-                                leg.get("pieces", 1), comment))
+                                leg["pieces"], comment))
         return out
 
     @staticmethod
@@ -1116,23 +1111,25 @@ class AppModel:
 # This tracks the CURRENT generator only: a log from an earlier one reports raw.
 # --------------------------------------------------------------------------
 
-# What the two hand-off tables give a DMA row: how many bytes it moves and what
-# to call it.  An Xfer's `rows` and `src_off` reach no label (rows becomes the 2D
-# descriptor's strides, src_off addresses the producer's own buffer) but both are
-# carried, since a row lacking either is not a table this parser can read.
+# One row of STAGE_XFER[], the celere hand-off table: how many bytes cross the
+# boundary and what to call them.  `src_off` and the two pitches reach no label
+# (they address the producer's own buffer and size a box column) but are carried,
+# since a row lacking them is not a table this parser can read.
 #
-# The five trailing fields are the LAYOUT-ROW form the generator grew later, and
-# they change the region COUNT, not just a size: nseg > 0 makes the leg walk
-# `cols` box columns per consumer and issue SEG[seg0 .. seg0+nseg) inside each,
-# which is cols * nseg bracketed DMAs where the plain copy issues one.  They
-# default to the plain copy, so an older 3-field row still reads.
-Xfer = namedtuple("Xfer", "nbytes rows src_off cols src_pitch dst_pitch "
-                          "seg0 nseg name",
-                  defaults=(0, 0, 0, 0, 0, None))
+# `nseg` is what decides the region COUNT, not just a size: nseg > 0 makes the leg
+# walk the box columns of one consumer and issue SEG[seg0 .. seg0+nseg) across
+# them, which is many bracketed DMAs where the plain copy (nseg == 0) issues one
+# -- see Seg below for how many.
+Xfer = namedtuple("Xfer", "nbytes src_off cols src_pitch dst_pitch "
+                          "seg0 nseg name")
 # One segment of a layout row's token-order map, as SEG[] lists it: the bytes the
-# single 2D descriptor moves (chunk * reps) and what that piece is called.  The
-# offsets and strides say WHERE it lands, which no region row carries.
-Seg = namedtuple("Seg", "nbytes name")
+# single 2D descriptor moves (chunk * reps), how many box columns the segment is
+# REISSUED for, and what that piece is called.  The offsets and strides say WHERE
+# it lands, which no region row carries.
+#
+# `visits` is 1 for a segment that had a repetition level spare and took the
+# column stride into it instead of being reissued.
+Seg = namedtuple("Seg", "nbytes visits name")
 # One off-chip leg: the bytes ONE descriptor moves, the edge it crosses, and how
 # many nodes the entry walks -- lpddr_pull()/lpddr_push() issue one bracketed DMA
 # of `nbytes` per node, so `nodes` is a region count, not a size.
@@ -1230,11 +1227,13 @@ class CelereApp:
     def _seg_table(src):
         """-> [Seg, ...], one entry per SEG[] row; [] when the app declares none.
 
-        A row is { chunk, src_off, dst_off, src_stride, dst_stride, reps }: one
-        segment of a layout row's token-order map, issued as a single bracketed
-        2D descriptor moving chunk * reps bytes.  Only that product reaches a
-        label, but a row of another shape would mis-count the descriptors a
-        layout leg costs, so it is an error rather than a silent zero.
+        A row is { chunk, src_off, dst_off, src_stride, dst_stride, reps,
+        visits }: one segment of a layout row's token-order map, issued as a
+        bracketed 2D descriptor moving chunk * reps bytes, `visits` times.
+
+        Only chunk * reps and visits reach the report, but a row of another shape
+        would mis-count the descriptors a layout leg costs, so it is an error
+        rather than a silent zero.
         """
         rows = table_rows(src, "SEG")
         if rows is None:
@@ -1242,28 +1241,25 @@ class CelereApp:
         out = []
         for fields, comment in rows:
             vals = [_uint(f) for f in fields]
-            if len(vals) != 6 or any(v is None for v in vals):
+            if len(vals) != 7 or any(v is None for v in vals):
                 raise ValueError(
-                    f"SEG[] row {{{', '.join(fields)}}} is not the "
+                    f"SEG[] row {{{', '.join(fields)}}} is not the 7-field "
                     f"{{ chunk, src_off, dst_off, src_stride, dst_stride, "
-                    f"reps }} this parser reads")
-            out.append(Seg(vals[0] * vals[5], comment))
+                    f"reps, visits }} this parser reads")
+            out.append(Seg(vals[0] * vals[5], vals[6], comment))
         return out
 
     @staticmethod
     def _xfer_table(src, segs):
         """-> [Xfer, ...], one entry per STAGE_XFER[] row.
 
-        A row opens with { bytes, rows, src_off }: the WHOLE tensor across both
-        stages' lanes, the destination row count, and where the producer holds
-        its own share.  The generator has grown the row once, and both widths
-        are read -- the older columns keep their meaning:
-
-          3   the original plain copy: one bracketed DMA per consumer
-          8   + cols, src_pitch, dst_pitch, seg0, nseg.  nseg > 0 IS A LAYOUT
-              ROW -- the leg walks `cols` box columns per consumer and issues
-              SEG[seg0 .. seg0+nseg) inside each, so it costs cols * nseg
-              descriptors, not one.  nseg == 0 is the plain copy above
+        A row is { bytes, src_off, cols, src_pitch, dst_pitch, seg0, nseg }: the
+        WHOLE tensor across both stages' lanes, where the producer holds its own
+        share, and how the leg is cut up.  nseg > 0 IS A LAYOUT ROW -- the leg
+        walks `cols` box columns per consumer and issues SEG[seg0 .. seg0+nseg)
+        across them, so it costs one descriptor per segment per column that
+        segment visits.  nseg == 0 is a plain copy: one bracketed DMA per
+        consumer, contiguous at both ends.
 
         Only byte counts reach a label, but every field is required, so a table
         of another shape is an error, not a silent zero.
@@ -1274,11 +1270,11 @@ class CelereApp:
         out = []
         for fields, comment in rows:
             vals = [_uint(f) for f in fields]
-            if len(vals) not in (3, 8) or any(v is None for v in vals):
+            if len(vals) != 7 or any(v is None for v in vals):
                 raise ValueError(
-                    f"STAGE_XFER[] row {{{', '.join(fields)}}} is neither the "
-                    f"3-field {{ bytes, rows, src_off }} nor the 8-field "
-                    f"layout-row xfer_t shape this parser reads")
+                    f"STAGE_XFER[] row {{{', '.join(fields)}}} is not the "
+                    f"7-field {{ bytes, src_off, cols, src_pitch, dst_pitch, "
+                    f"seg0, nseg }} this parser reads")
             x = Xfer(*vals, name=comment)
             if x.nseg and x.seg0 + x.nseg > len(segs):
                 raise ValueError(
@@ -1294,17 +1290,12 @@ class CelereApp:
     def _lpddr_table(src, name):
         """-> [Leg, ...], one entry per lpddr_xfer_t row.
 
-        A row opens with { lpddr_off, l1_off, lane_step, chunk, lpddr_stride,
-        l1_stride, reps }: chunk * reps bytes per descriptor.  The generator has
-        grown the row twice, and all three widths are read -- the older columns
-        keep their meaning and the new ones only default:
-
-          7   the original row, before edges were a choice: south, one node
-          8   + edge, which direction does not imply (a stage drains north and
-              still reads its base off a south node)
-          10  + nodes, lanes_per_node.  A lane spanning several nodes gets one
-              bracketed DMA each, so `nodes` is a region count; lanes_per_node
-              only picks the offset inside a shared node
+        A row is { lpddr_off, l1_off, lane_step, chunk, lpddr_stride, l1_stride,
+        reps, edge, nodes, lanes_per_node }: chunk * reps bytes per descriptor,
+        across `edge`, which the direction does not imply (a stage drains north
+        and still reads its base off a south node).  A lane spanning several
+        nodes gets one bracketed DMA each, so `nodes` is a region count;
+        lanes_per_node only picks the offset inside a shared node.
 
         Anything else is an error rather than a silently mis-sized leg.
         """
@@ -1313,17 +1304,18 @@ class CelereApp:
             return []
         out = []
         for fields, comment in rows:
+            # `edge` is a macro name, not an integer, so it sits out of the
+            # numeric read and is checked on its own.
             vals = [_uint(f) for f in fields[:7]] + [_uint(f)
                                                      for f in fields[8:]]
-            edge_field = fields[7].upper() if len(fields) > 7 else "SOUTH"
-            if (len(fields) not in (7, 8, 10) or any(v is None for v in vals)
-                    or (len(fields) > 7 and "LPDDR_EDGE" not in edge_field)):
+            edge_field = fields[7].upper() if len(fields) > 7 else ""
+            if (len(fields) != 10 or any(v is None for v in vals)
+                    or "LPDDR_EDGE" not in edge_field):
                 raise ValueError(
-                    f"{name}[] row {{{', '.join(fields)}}} is not one of the "
-                    f"7-, 8- or 10-field lpddr_xfer_t shapes this parser reads")
+                    f"{name}[] row {{{', '.join(fields)}}} is not the 10-field "
+                    f"lpddr_xfer_t shape this parser reads")
             edge = "north" if "NORTH" in edge_field else "south"
-            nodes = vals[7] if len(fields) == 10 else 1
-            out.append(Leg(vals[3] * vals[6], edge, nodes, comment))
+            out.append(Leg(vals[3] * vals[6], edge, vals[7], comment))
         return out
 
     # -- region tables ----------------------------------------------------
@@ -1423,15 +1415,13 @@ class CelereApp:
                                        its slot of the consumer's rows
           straight (equal)             one transfer of this lane's share
 
-        A row's `rows` only re-lays the share out in the descriptor's strides, so
-        it moves the same bytes either way and does not appear here.  main()
-        skips the push for the last stage and for any tiled stage, which drains
-        itself.
+        main() skips the push for the last stage and for any tiled stage, which
+        drains itself.
 
         A LAYOUT ROW (nseg > 0) overrides all three: the share is not one
-        transfer but one PER SEGMENT of every box column, so the count is
-        r * cols * nseg and each row is sized by its own segment -- the shape
-        of the fan-out only sets r.
+        transfer but one per segment per box column that segment covers, so the
+        count is r * sum(visits) and each row is sized by its own segment -- the
+        shape of the fan-out only sets r.
         """
         if sid >= self.n_stages or self.tiles[sid] != 1:
             return []
@@ -1444,19 +1434,20 @@ class CelereApp:
             own_dst = x.nbytes // lanes_nx      # what one consumer needs
             what = f" {x.name}" if x.name else ""
             if x.nseg:
-                # The nest push_to_next() runs: r consumers, x.cols box columns
-                # each, x.nseg descriptors inside a column.  Every one of them is
-                # bracketed on its own, so every one of them is a region.
+                # The nest push_to_next() runs, once per consumer: each segment
+                # of the leg, reissued for every box column it visits.  Every one
+                # of those descriptors is bracketed on its own, so every one of
+                # them is a region -- issued in this order.
+                segs = [self.segs[x.seg0 + s] for s in range(x.nseg)]
+                issued = [g for g in segs for _ in range(g.visits)]
                 r = lanes_nx // lanes if lanes_nx > lanes else 1
                 for k in range(r):
                     dest = (f"stage {sid + 1} lane {k}" if r > 1
                             else f"stage {sid + 1}")
-                    for _ in range(x.cols):
-                        for s in range(x.nseg):
-                            seg = self.segs[x.seg0 + s]
-                            named = f"{what}: {seg.name}" if seg.name else what
-                            out.append(f"DMA  layout -> {dest}{named}"
-                                       f" ({seg.nbytes} B)")
+                    for seg in issued:
+                        named = f"{what}: {seg.name}" if seg.name else what
+                        out.append(f"DMA  layout -> {dest}{named}"
+                                   f" ({seg.nbytes} B)")
             elif lanes_nx > lanes:
                 out += [f"DMA  scatter -> stage {sid + 1} lane {k}"
                         f"{what} ({own_dst} B)"
@@ -1599,10 +1590,11 @@ BANKED_STRIDE = 2 * N_CORES * BANKING_FACTOR    # 4096 elements
 #         (noc_link_width, arch_tensorpool.py:76)                 64  GB/s
 #   L1    cluster-local layout copy, L1 -> L1                     unmeasured
 #
-# The off-chip node is spelled "hbm" in the arch config whatever DRAMSys model is
-# behind it, so both spellings are matched.  Its peak is read per run from the
-# DRAMSys 'MAX BW' footer; the constant below is only the fallback for a log
-# without one, and --dram-peak overrides both.
+# The off-chip node is spelled "hbm" in the arch config and in the app's own
+# window helpers whatever DRAMSys model is behind it; a region label always calls
+# it LPDDR.  Its peak is read per run from the DRAMSys 'MAX BW' footer; the
+# constant below is only the fallback for a log without one, and --dram-peak
+# overrides both.
 #
 # At 1 GHz a cycle is a ns, so B/cyc reads directly as GB/s:
 #     uti = bytes / (peak_B_per_cyc * span)
@@ -1661,9 +1653,9 @@ def dma_link(label):
     Every row is one cluster's transfer over one link, so the peaks are the
     per-link ones: concurrent lanes are separate rows, never summed into one.
     """
-    # 'HBM' is the cevit generator's spelling, 'LPDDR' the celere one; both name
-    # the same off-chip link.
-    if "HBM" in label or "LPDDR" in label:      # off-chip, see above
+    # Both flavours spell the off-chip link 'LPDDR' in a region label, whichever
+    # hbm_*() window the app's own call named.
+    if "LPDDR" in label:                        # off-chip, see above
         return "LPDDR", DRAM_PEAK_BPC
     if "-> stage" in label:                     # push / scatter / gather
         return "NoC", NOC_PEAK_BPC
@@ -2179,7 +2171,7 @@ def write_csv(clusters, path, app):
 
 
 # --------------------------------------------------------------------------
-# Pipeline figure -- compute against transfer, per stage
+# Pipeline figures -- compute against transfer, per stage
 #
 # One x slot per pipeline stage, the clusters of a head-parallel stage side by
 # side inside a shaded slot.  Each region is charged by the unit work_model()
@@ -2188,9 +2180,11 @@ def write_csv(clusters, path, app):
 #   transfer -- DMA:NoC, DMA:LPDDR   (stage hand-offs and the off-chip legs)
 #   compute  -- everything else: TE, PE and the DMA:L1 layout copies
 #
-# A lane's height is the SUM of its region spans, matching the CSV.  Each bar is
-# subdivided into its regions, one segment per kernel and per DMA: CTT orders
-# them bottom-to-top by execution, CWT splits them over two bars.
+# A lane's height is the SUM of its region spans, matching the CSV.  Two figures
+# draw the same bars: plot_split() colours them compute against transfer, and
+# plot_kernels() subdivides them into their regions, one segment per kernel and
+# per DMA.  They share the x layout and the y limit, so a lane sits at the same
+# place and the same height on both and the pair can be read side by side.
 # --------------------------------------------------------------------------
 
 TRANSFER_KINDS = ("DMA:NoC", "DMA:LPDDR")
@@ -2250,15 +2244,15 @@ class Lane:
     name:        str        # cluster label as it appears in the report
     compute_ms:  float
     transfer_ms: float
-    din_ms:      float = 0.0    # the `stage input` HBM -> L1 read, already INSIDE
-                                # transfer_ms; see wall()
+    din_ms:      float = 0.0    # the `stage input` LPDDR -> L1 read, already
+                                # INSIDE transfer_ms; see wall()
     layers:      list = field(default_factory=list)  # its regions, execution order
 
     def wall(self, overlap):
         """Wall of this cluster [ms].
 
         CWT overlaps a cluster's outbound hand-off with its compute, but NOT its
-        stage input: the generated loop reads that with the blocking dma_1d and
+        stage input: the generated loop reads that with a blocking DMA and
         holds the worker cores on flex_intra_cluster_sync() until it lands, so it
         is serialized in front of the compute and sits outside the max.  Only
         stage 0 has one; every other lane reduces to max(compute, transfer).
@@ -2358,38 +2352,25 @@ def build_stages(clusters, app, cycles_per_ms):
     return [stages[k] for k in sorted(stages)]
 
 
-def plot_cluster_split(label, stages, overlap, out_path, ymax):
-    """Two stacked panels of per-cluster wall time, on one shared y axis.
+# The width of one stage's x slot.  Its lanes share it, and CWT gives every lane
+# two bars (compute, transfer) where CTT gives it one.
+SLOT_SPAN = 0.82
+# Inches of figure width per bar of the BUSIEST stage.  Size follows the
+# crowding, not the cluster count: the x axis is one slot per stage whatever that
+# stage holds, so what needs the room is the widest slot, not the total -- a
+# 30-cluster pipeline eight lanes wide is a readable figure, its cluster count is
+# a wall five feet across.
+BAR_INCHES = 0.25
+LEGEND_INCHES = 2.6                 # reserved to the right of the axes
+PANEL_HEIGHT = 4.6
 
-    One x position per PIPELINE STAGE; a head-parallel stage draws its clusters
-    SIDE BY SIDE inside a shaded slot, so the picture shows directly that the
-    stage's wall is the height of one lane, not their sum.
 
-    Serialized split (CTT) -> stacked bars   (wall = compute + transfer).
-    Overlapped split (CWT) -> grouped bars   (wall = max(compute, transfer)).
+def build_palette(stages):
+    """-> (classes biggest-first, {class: is a transfer}, {class: colour}).
 
-    The top panel is the plain compute-vs-transfer split; the bottom one is the
-    same bars, same heights, subdivided into the regions that make them up, one
-    segment per kernel and per DMA in execution order.  Only the totals are
-    shared, so the segments need not line up with the colour boundary above.
-
-    In the CWT top panel a lane's `stage input` read is drawn hatched as the
-    pedestal both its compute bar and its overlapped hand-off bar stand on: it
-    enters the wall as din + max(compute, rest).  Only stage 0 has one; below, it
-    is just another LPDDR segment.
+    Colours are assigned by total cost, so the legend reads in order of cost and
+    a class keeps its colour across both figures of a run.
     """
-    import matplotlib
-    matplotlib.use("Agg")           # headless: write PNGs, never open a window
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Patch
-
-    n_stages = len(stages)
-    tag      = "CWT" if overlap else "CTT"
-    n_phys   = sum(st.n_par for st in stages)
-    any_din  = any(ln.din_ms > 0.0 for st in stages for ln in st.lanes)
-
-    # Colour every class up front, biggest first, so the legend reads in order of
-    # cost and a class keeps its colour across the figures of a run.
     total, side = defaultdict(float), {}
     for st in stages:
         for ln in st.lanes:
@@ -2411,119 +2392,182 @@ def plot_cluster_split(label, stages, overlap, out_path, ymax):
         free = [c for c in pool if c not in set(palette.values())]
         palette[cls] = free[0] if free else pool[fb[side[cls]] % len(pool)]
         fb[side[cls]] += 1
-    # the stage input is an off-chip read, so in the kernel panel it is an LPDDR
-    # segment like any other
-    din_colour = palette.get("DMA LPDDR", "green")
+    return order, side, palette
 
-    # Both panels share the y axis, so the subdivision below lines up row for row
-    # with the split above.  Legends sit outside the axes.
-    fig, (ax_top, ax_ker) = plt.subplots(
-        2, 1, sharex=True, sharey=True,
-        figsize=(max(5.0, 1.3 * n_phys + 2.5) + 2.6, 7.6))
 
-    span = 0.82                       # width of a stage slot
+def slot_of(s, st, overlap):
+    """-> (left edge, bar pitch, drawn bar width) for stage `st` at x slot `s`."""
+    bw = SLOT_SPAN / ((2 if overlap else 1) * st.n_par)
+    # keep a lone cluster's bar from ballooning to the full slot width
+    return s - SLOT_SPAN / 2, bw, min(bw * 0.9, 0.30 if overlap else 0.34)
+
+
+def lane_x(left, bw, lane_i, overlap):
+    """-> the centre of one lane's bar (CTT) or of its bar pair (CWT)."""
+    return left + ((2 * lane_i + 1.0) if overlap else (lane_i + 0.5)) * bw
+
+
+def new_panel(stages, overlap):
+    """-> (plt, Patch, fig, ax) for one figure, sized to the busiest stage."""
+    import matplotlib
+    matplotlib.use("Agg")           # headless: write PNGs, never open a window
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    bars = max(st.n_par for st in stages) * (2 if overlap else 1)
+    per_stage = max(1.5, BAR_INCHES * bars)
+    fig, ax = plt.subplots(figsize=(max(5.0, per_stage * len(stages))
+                                    + LEGEND_INCHES, PANEL_HEIGHT))
+    return plt, Patch, fig, ax
+
+
+def finish_panel(plt, fig, ax, stages, overlap, ymax, handles, panel, label,
+                 out_path):
+    """Shade the head-parallel slots, label the axes and write the PNG.
+
+    Everything the two figures have in common lives here, so they come out with
+    the same x layout and the same y limit and can be read side by side: a lane
+    sits at the same x and reaches the same height on each.  The legend sits
+    outside the axes.
+    """
     tick_pos, tick_lab = [], []
-
-    def stack(ax, x, layers, bottom, width):
-        """Draw one region-per-segment stack; -> the top it reaches.
-
-        Every segment is solid and the full width of its bar: this panel answers
-        only which kernel, the one above carries the compute/transfer split.
-        """
-        for lay in layers:
-            ax.bar(x, lay.ms, width=width, bottom=bottom, color=palette[lay.cls],
-                   edgecolor="white", linewidth=0.4, zorder=2)
-            bottom += lay.ms
-        return bottom
-
     for s, st in enumerate(stages):
-        p     = st.n_par
-        slots = 2 * p if overlap else p            # bars in this stage's slot
-        bw    = span / slots
-        # keep a lone cluster's bar from ballooning to the full slot width
-        draw  = min(bw * 0.9, 0.30 if overlap else 0.34)
-        left  = s - span / 2
-
-        if p > 1:
-            for ax in (ax_top, ax_ker):
-                ax.axvspan(left - 0.03, left + span + 0.03, color="0.92", zorder=0)
+        left, bw, _ = slot_of(s, st, overlap)
+        if st.n_par > 1:
+            ax.axvspan(left - 0.03, left + SLOT_SPAN + 0.03, color="0.92", zorder=0)
         for lane_i, lane in enumerate(st.lanes):
-            comp_layers = [l for l in lane.layers if not l.transfer]
-            xfer_layers = [l for l in lane.layers if l.transfer]
-            if overlap:
-                xmid = left + (2 * lane_i + 1.0) * bw
-                # the stage input read is exposed: it delays BOTH the compute and
-                # the overlapped hand-off, so both bars start on top of it
-                rest = lane.transfer_ms - lane.din_ms
-                if lane.din_ms > 0.0:
-                    for x in (xmid - bw / 2, xmid + bw / 2):
-                        ax_top.bar(x, lane.din_ms, width=draw, color="green",
-                                   hatch="//", edgecolor="white", zorder=2)
-                        # below it is just its kernel class, like any other segment
-                        ax_ker.bar(x, lane.din_ms, width=draw, color=din_colour,
-                                   edgecolor="white", linewidth=0.4, zorder=2)
-                ax_top.bar(xmid - bw / 2, lane.compute_ms, width=draw,
-                           bottom=lane.din_ms, color="red", zorder=2)
-                ax_top.bar(xmid + bw / 2, rest, width=draw, bottom=lane.din_ms,
-                           color="green", zorder=2)
-                # the pedestal is already drawn, so the transfer stack is the rest
-                # of the hand-offs standing on it
-                stack(ax_ker, xmid - bw / 2, comp_layers, lane.din_ms, draw)
-                stack(ax_ker, xmid + bw / 2, [l for l in xfer_layers if not l.din],
-                      lane.din_ms, draw)
-            else:
-                xmid = left + (lane_i + 0.5) * bw
-                ax_top.bar(xmid, lane.compute_ms, width=draw, color="red", zorder=2)
-                ax_top.bar(xmid, lane.transfer_ms, width=draw,
-                           bottom=lane.compute_ms, color="green", zorder=2)
-                # CTT sums the two halves, so segment order does not change the
-                # bar height: stack them in execution order.
-                stack(ax_ker, xmid, lane.layers, 0.0, draw)
             # cluster id above its own bar(s), clear of the stage ticks below the axis
-            for ax in (ax_top, ax_ker):
-                ax.annotate(f"c{lane.cid}", xy=(xmid, lane.wall(overlap)),
-                            xytext=(0, 3), textcoords="offset points",
-                            ha="center", va="bottom", fontsize=7, color="0.35")
-
+            ax.annotate(f"c{lane.cid}",
+                        xy=(lane_x(left, bw, lane_i, overlap), lane.wall(overlap)),
+                        xytext=(0, 3), textcoords="offset points",
+                        ha="center", va="bottom", fontsize=7, color="0.35")
         tick_pos.append(s)
-        tick_lab.append(f"stage {st.idx}" + (f"\n({p} clusters || )" if p > 1 else ""))
+        tick_lab.append(f"stage {st.idx}"
+                        + (f"\n({st.n_par} clusters || )" if st.n_par > 1 else ""))
 
-    top_handles = [Patch(facecolor="red", label="compute"),
-                   Patch(facecolor="green", label="transfer")]
-    if overlap and any_din:
-        top_handles.append(Patch(facecolor="green", hatch="//", edgecolor="white",
-                                 label="stage input (not overlapped)"))
-
-    # Grouped by side: the header rows say which half of the bar above each
-    # colour belongs to, so the split survives having a colour per kernel.
-    ker_handles = []
-    for is_xfer, head in ((False, "compute"), (True, "transfer")):
-        group = [c for c in order if side[c] is is_xfer]
-        if not group:
-            continue
-        ker_handles.append(Patch(facecolor="none", edgecolor="none", label=f"{head}:"))
-        ker_handles += [Patch(facecolor=palette[c], edgecolor="white",
-                              label=LAYER_LEGEND.get(c, c)) for c in group]
-
-    ax_top.set_ylim(0.0, ymax if ymax else
-                    1.15 * max(st.wall(overlap) for st in stages))
-    ax_ker.set_xticks(tick_pos)
-    ax_ker.set_xticklabels(tick_lab)
-    ax_ker.set_xlim(-0.6, n_stages - 0.4)
-    for ax, panel, handles in ((ax_top, "compute vs transfer", top_handles),
-                               (ax_ker, "by kernel", ker_handles)):
-        ax.tick_params(axis="x", length=0, pad=6)
-        ax.set_ylabel("wall time [ms]")
-        ax.set_title(panel, fontsize="small", loc="left", color="0.35")
-        ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0),
-                  fontsize="small", frameon=False, handlelength=1.4,
-                  borderaxespad=0.0)
-    ax_ker.set_xlabel("pipeline stage  (clusters of a stage run in parallel)")
-    fig.suptitle(f"{label} -- {tag}  |  {n_stages} stages over {n_phys} clusters")
+    ax.set_ylim(0.0, ymax if ymax else
+                1.15 * max(st.wall(overlap) for st in stages))
+    ax.set_xticks(tick_pos)
+    ax.set_xticklabels(tick_lab)
+    ax.set_xlim(-0.6, len(stages) - 0.4)
+    ax.tick_params(axis="x", length=0, pad=6)
+    ax.set_ylabel("wall time [ms]")
+    ax.set_xlabel("pipeline stage  (clusters of a stage run in parallel)")
+    ax.set_title(panel, fontsize="small", loc="left", color="0.35")
+    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0),
+              fontsize="small", frameon=False, handlelength=1.4,
+              borderaxespad=0.0)
+    n_phys = sum(st.n_par for st in stages)
+    fig.suptitle(f"{label} -- {'CWT' if overlap else 'CTT'}  |  "
+                 f"{len(stages)} stages over {n_phys} clusters")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_split(label, stages, overlap, out_path, ymax):
+    """Per-cluster wall time, compute against transfer.
+
+    One x position per PIPELINE STAGE; a head-parallel stage draws its clusters
+    SIDE BY SIDE inside a shaded slot, so the picture shows directly that the
+    stage's wall is the height of one lane, not their sum.
+
+    Serialized split (CTT) -> stacked bars   (wall = compute + transfer).
+    Overlapped split (CWT) -> grouped bars   (wall = max(compute, transfer)).
+
+    In CWT a lane's `stage input` read is drawn hatched as the pedestal both its
+    compute bar and its overlapped hand-off bar stand on: it enters the wall as
+    din + max(compute, rest).  Only stage 0 has one.
+    """
+    plt, Patch, fig, ax = new_panel(stages, overlap)
+
+    for s, st in enumerate(stages):
+        left, bw, draw = slot_of(s, st, overlap)
+        for lane_i, lane in enumerate(st.lanes):
+            xmid = lane_x(left, bw, lane_i, overlap)
+            if overlap:
+                # the stage input read is exposed: it delays BOTH the compute and
+                # the overlapped hand-off, so both bars start on top of it
+                if lane.din_ms > 0.0:
+                    for x in (xmid - bw / 2, xmid + bw / 2):
+                        ax.bar(x, lane.din_ms, width=draw, color="green",
+                               hatch="//", edgecolor="white", zorder=2)
+                ax.bar(xmid - bw / 2, lane.compute_ms, width=draw,
+                       bottom=lane.din_ms, color="red", zorder=2)
+                ax.bar(xmid + bw / 2, lane.transfer_ms - lane.din_ms, width=draw,
+                       bottom=lane.din_ms, color="green", zorder=2)
+            else:
+                ax.bar(xmid, lane.compute_ms, width=draw, color="red", zorder=2)
+                ax.bar(xmid, lane.transfer_ms, width=draw,
+                       bottom=lane.compute_ms, color="green", zorder=2)
+
+    handles = [Patch(facecolor="red", label="compute"),
+               Patch(facecolor="green", label="transfer")]
+    if overlap and any(ln.din_ms > 0.0 for st in stages for ln in st.lanes):
+        handles.append(Patch(facecolor="green", hatch="//", edgecolor="white",
+                             label="stage input (not overlapped)"))
+    finish_panel(plt, fig, ax, stages, overlap, ymax, handles,
+                 "compute vs transfer", label, out_path)
+
+
+def plot_kernels(label, stages, overlap, out_path, ymax):
+    """The same bars, same heights, subdivided into the regions that make them up.
+
+    One segment per kernel and per DMA, in execution order: CTT stacks a lane's
+    whole sequence in its one bar, CWT deals it out over the compute and transfer
+    bars the schedule runs concurrently.  Every segment is solid and the full
+    width of its bar -- this figure answers only WHICH kernel, plot_split()
+    carries the compute/transfer split.
+
+    In CWT the `stage input` read keeps its place as the pedestal both bars stand
+    on, but here it is just another LPDDR segment.
+    """
+    plt, Patch, fig, ax = new_panel(stages, overlap)
+    order, side, palette = build_palette(stages)
+    # the stage input is an off-chip read, so here it is an LPDDR segment like
+    # any other
+    din_colour = palette.get("DMA LPDDR", "green")
+
+    def stack(x, layers, bottom, width):
+        """Draw one region-per-segment stack, bottom-to-top."""
+        for lay in layers:
+            ax.bar(x, lay.ms, width=width, bottom=bottom, color=palette[lay.cls],
+                   edgecolor="white", linewidth=0.4, zorder=2)
+            bottom += lay.ms
+
+    for s, st in enumerate(stages):
+        left, bw, draw = slot_of(s, st, overlap)
+        for lane_i, lane in enumerate(st.lanes):
+            xmid = lane_x(left, bw, lane_i, overlap)
+            if overlap:
+                if lane.din_ms > 0.0:
+                    for x in (xmid - bw / 2, xmid + bw / 2):
+                        ax.bar(x, lane.din_ms, width=draw, color=din_colour,
+                               edgecolor="white", linewidth=0.4, zorder=2)
+                # the pedestal is already drawn, so each stack is what stands on it
+                stack(xmid - bw / 2, [l for l in lane.layers if not l.transfer],
+                      lane.din_ms, draw)
+                stack(xmid + bw / 2,
+                      [l for l in lane.layers if l.transfer and not l.din],
+                      lane.din_ms, draw)
+            else:
+                # CTT sums the two halves, so segment order does not change the
+                # bar height: stack them in execution order.
+                stack(xmid, lane.layers, 0.0, draw)
+
+    # Grouped by side: the header rows say which half of the split figure each
+    # colour belongs to, so that reading survives having a colour per kernel.
+    handles = []
+    for is_xfer, head in ((False, "compute"), (True, "transfer")):
+        group = [c for c in order if side[c] is is_xfer]
+        if not group:
+            continue
+        handles.append(Patch(facecolor="none", edgecolor="none", label=f"{head}:"))
+        handles += [Patch(facecolor=palette[c], edgecolor="white",
+                          label=LAYER_LEGEND.get(c, c)) for c in group]
+    finish_panel(plt, fig, ax, stages, overlap, ymax, handles,
+                 "by kernel", label, out_path)
 
 
 def print_pipeline_model(label, stages, overlap):
@@ -2596,16 +2640,28 @@ def make_plots(clusters, app, args, incomplete=None):
                   f"{schedule_name(app.overlapped)} schedule; drawing it as "
                   f"asked", file=sys.stderr)
         print_pipeline_model(label, stages, overlap)
-        out = (Path(path) if path else
-               log.parent / f"{app.flavour}_bench_plots"
-               / f"{app.plot_tag}_{tag}_split_{log.stem}.png")
+        # Two figures per schedule.  An explicit --plot_* path names the
+        # compute-vs-transfer one and the per-kernel one takes that name with
+        # '_kernels' appended, so one flag still yields both pictures.
+        if path:
+            out = Path(path)
+            figs = [(plot_split, out),
+                    (plot_kernels,
+                     out.with_name(f"{out.stem}_kernels{out.suffix}"))]
+        else:
+            d = log.parent / f"{app.flavour}_bench_plots"
+            figs = [(plot_split,
+                     d / f"{app.plot_tag}_{tag}_split_{log.stem}.png"),
+                    (plot_kernels,
+                     d / f"{app.plot_tag}_{tag}_kernels_{log.stem}.png")]
         try:
-            plot_cluster_split(label, stages, overlap, out, args.ymax)
+            for draw, out in figs:
+                draw(label, stages, overlap, out, args.ymax)
+                print(f"\n    [plot] {out}")
         except ImportError:
-            print("\nwarning: matplotlib not installed; plot skipped "
+            print("\nwarning: matplotlib not installed; plots skipped "
                   "(pip install matplotlib).", file=sys.stderr)
             return
-        print(f"\n    [plot] {out}")
 
 
 def main():
@@ -2636,15 +2692,18 @@ def main():
                          "(implied by --celere)")
     ap.add_argument("--csv", metavar="FILE", help="also write a CSV of the table")
     ap.add_argument("--plot_ctt", nargs="?", const="", metavar="PNG",
-                    help="draw the compute-then-transfer figure (stacked bars): one "
+                    help="draw the compute-then-transfer figures (stacked bars): one "
                          "slot per stage, the clusters of a head-parallel stage side "
-                         "by side.  Needs --app.  Default path is "
-                         "<flavour>_bench_plots/<TAG>_CTT_split_<log>.png next "
-                         "to the log")
+                         "by side.  Writes TWO files -- the compute-vs-transfer "
+                         "split, and the same bars subdivided by kernel.  Needs "
+                         "--app.  Default paths are <flavour>_bench_plots/"
+                         "<TAG>_CTT_{split,kernels}_<log>.png next to the log; "
+                         "given a PNG, the per-kernel one takes that name with "
+                         "'_kernels' appended")
     ap.add_argument("--plot_cwt", nargs="?", const="", metavar="PNG",
-                    help="same figure for the compute-while-transfer flavour "
-                         "(grouped bars, with the unoverlappable stage input drawn "
-                         "hatched under both)")
+                    help="the same pair of figures for the compute-while-transfer "
+                         "flavour (grouped bars, with the unoverlappable stage input "
+                         "drawn hatched under both)")
     ap.add_argument("--ymax", type=float, metavar="MS",
                     help="fixed y-axis limit in ms, to put two runs on the same "
                          "scale (default: auto-scale)")
